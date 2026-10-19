@@ -40,7 +40,7 @@ $Host.UI.RawUI.WindowTitle = 'Rion Tool'
  
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Windows.Forms
  
-$script:Build     = '2026-10-19.1'
+$script:Build     = '2026-10-19.2'
 $script:DataDir   = Join-Path $env:ProgramData 'RionTool'
 $script:LogPath   = Join-Path $script:DataDir 'rion.log'
 $script:BackupDir = Join-Path $script:DataDir 'backups'
@@ -76,7 +76,7 @@ function Read-Journal {
         }
     } catch { Write-Log ("Could not read saved original values: {0}" -f $_.Exception.Message) 'Warn' }
 }
-$script:RetiredTweaks = @('adv.prio.background','cpu.powerthrottling','feat.gaming.fse','app.chrome.extensions','app.edge.extensions','app.brave.extensions','app.firefox.extensions','svc.dev.hotkey','svc.dev.hdhotkey','svc.vendor.oem','startup.xbox','startup.phonelink','startup.copilot','startup.teams','svc.feat.kiosk','svc.net.snmp','svc.legacy.unused','svc.net.wcn','svc.dev.perception','svc.feat.cellulartime','svc.net.peer','svc.bg.retaildemo','task.retaildemo','task.mobilebroadband','svc.dev.mixedreality','svc.bg.insider','net.dnsnegative','mem.pagingexec','net.wifi.txpower','adv.devices.gswavetable','adv.devices.speakerwifi','adv.devices.kerneldebug','adv.devices.ndis','app.chrome.hwaccel','app.edge.hwaccel','app.brave.hwaccel','app.firefox.hwaccel','feat.notify.off','svc.feat.themes','feat.opt.pdf','svc.feat.seclogon','svc.net.radio','svc.net.ipsec','input.mouse.onetoone','boot.chkdsk','priv.hosts.telemetry','net.qos.nla')
+$script:RetiredTweaks = @('feat.search.webview2','svc.bg.appr','adv.prio.background','cpu.powerthrottling','feat.gaming.fse','app.chrome.extensions','app.edge.extensions','app.brave.extensions','app.firefox.extensions','svc.dev.hotkey','svc.dev.hdhotkey','svc.vendor.oem','startup.xbox','startup.phonelink','startup.copilot','startup.teams','svc.feat.kiosk','svc.net.snmp','svc.legacy.unused','svc.net.wcn','svc.dev.perception','svc.feat.cellulartime','svc.net.peer','svc.bg.retaildemo','task.retaildemo','task.mobilebroadband','svc.dev.mixedreality','svc.bg.insider','net.dnsnegative','mem.pagingexec','net.wifi.txpower','adv.devices.gswavetable','adv.devices.speakerwifi','adv.devices.kerneldebug','adv.devices.ndis','app.chrome.hwaccel','app.edge.hwaccel','app.brave.hwaccel','app.firefox.hwaccel','feat.notify.off','svc.feat.themes','feat.opt.pdf','svc.feat.seclogon','svc.net.radio','svc.net.ipsec','input.mouse.onetoone','boot.chkdsk','priv.hosts.telemetry','net.qos.nla')
 $script:MergedTweaks = [ordered]@{ 'gpu.nv.telemetry'='task.gpu.nv.reports'; 'svc.net.workschool'='svc.feat.account'; 'app.steam.startup'='startup.steam'; 'app.discord.startup'='startup.discord'; 'app.epic.startup'='startup.epic'; 'app.battlenet.startup'='startup.battlenet'; 'app.ea.startup'='startup.ea'; 'app.ubisoft.startup'='startup.ubisoft'; 'app.riot.startup'='startup.riot'; 'adv.prio.sep'='adv.prio.sep26'; 'cpu.epp'='cpu.ppm.perfepp'; 'feat.ai.copilotlegacy'='feat.ai.copilotall'; 'task.featureusage'='task.tel.flighting'; 'svc.xbox.dvr'='sec.gamedvr'; 'svc.feat.location'='net.wifi.location'; 'svc.feat.fax'='feat.opt.fax'; 'svc.feat.workfolders'='feat.opt.workfolders'; 'task.workfolders'='feat.opt.workfolders'; 'svc.vendor.asus'='vendor.asus'; 'net.wifi.mimo'='net.wifi.powersave'; 'net.wifi.uapsd'='net.wifi.powersave' }
 function Invoke-RetiredTweakCleanup {
     if (-not (Test-IsAdmin)) { return }
@@ -1199,9 +1199,15 @@ function Get-ServiceStartValue {
 function Set-ServiceStartNow {
     param([string]$Name,[int]$Start)
     $type = switch ($Start) { 2 {'Automatic'} 3 {'Manual'} 4 {'Disabled'} default { $null } }
-    if ($type) {
+    $svcType = 0; try { $svcType = [int](Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name Type -ErrorAction Stop).Type } catch { }
+    $registryOnly = ($Name -match '_[0-9a-fA-F]{4,}$') -or ($svcType -band 0x0B) -or ($svcType -band 0x40)
+    if ($type -and -not $registryOnly) {
         try { Set-Service -Name $Name -StartupType $type -ErrorAction Stop; return }
-        catch { Write-Log ("Service manager refused to change {0}: {1}" -f $Name,$_.Exception.Message) 'Warn' }
+        catch {
+            $msg = $_.Exception.Message
+            if ($msg -match '(?i)parameter is incorrect|not valid') { Write-Log ("{0} cannot be changed through the service manager; set in the registry instead (applies after a restart)." -f $Name) 'Info' }
+            else { Write-Log ("Service manager refused to change {0}: {1}" -f $Name,$msg) 'Warn' }
+        }
     }
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name Start -Value $Start -Type DWord -ErrorAction Stop
 }
@@ -1321,7 +1327,6 @@ $script:Tweaks += New-ServiceGroup -Id 'svc.bg.sysmain' -Tab 'Tweaks' -SubTab 'S
 $script:Tweaks += New-ServiceGroup -Id 'svc.bg.diag' -Tab 'Tweaks' -SubTab 'Services' -Group 'Telemetry and diagnostics' -Label 'Turn off Windows diagnostic helpers' -Risk 'Risky' -Services @('DPS','WdiServiceHost','WdiSystemHost') -Info 'Diagnostic Policy Service and WDI hosts. Disabling them breaks the built-in troubleshooters and some network diagnostics.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.bg.pca' -Tab 'Tweaks' -SubTab 'Services' -Group 'Telemetry and diagnostics' -Label 'Stop compatibility assistant checks' -Risk 'Moderate' -Services @('PcaSvc') -Info 'The assistant that detects apps that fail to install/run and offers compatibility fixes. Rarely needed on modern apps.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.bg.datausage' -Tab 'Tweaks' -SubTab 'Services' -Group 'Telemetry and diagnostics' -Label 'Stop per-app data accounting' -Risk 'Moderate' -Services @('DusmSvc') -Info 'Data Usage service tracks per-app network bytes shown in Settings. Does not affect connectivity.'
-$script:Tweaks += New-ServiceTweak -Id 'svc.bg.appr' -Group 'Background' -Label 'Turn off Store app readiness setup' -Risk 'Risky' -Service 'AppReadiness' -Info 'Prepares Store apps for first sign-in and new-user provisioning. With it disabled, feature updates and new sign-ins can hang at "Preparing Windows" and Store apps may fail to register. Disable only on a single-user PC that does not use Store apps, and turn it back on before a feature update.'
 $script:Tweaks += New-ServiceTweak -Id 'svc.bg.wallet' -Group 'Background' -Label 'Stop Wallet credential management' -Risk 'Safe' -Service 'WalletService' -Info 'Manages payment credential objects for Wallet. Disable only if you do not use Wallet or related payment apps.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.bg.appupdate' -Tab 'Tweaks' -SubTab 'Services' -Group 'Updates' -Label 'Make browser and Adobe updaters on-demand' -Risk 'Moderate' -StartType 'Manual' -RevertType 'Manual' -Services @('edgeupdate','edgeupdatem','GoogleUpdaterInternalService','GoogleUpdaterService','AdobeARMservice') -Info 'Changes installed browser and Adobe updater services to Manual. Apps can still update when launched; updater service names vary by version.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.bg.peruser' -Tab 'Tweaks' -SubTab 'Services' -Group 'Background apps' -Label 'Set session sync helpers to on-demand' -Risk 'Moderate' -StartType 'Manual' -RevertType 'Manual' -Services @('OneSyncSvc','OneSyncSvc_*','CDPUserSvc','CDPUserSvc_*','UserDataSvc','UserDataSvc_*','UnistoreSvc','UnistoreSvc_*','PimIndexMaintenanceSvc','PimIndexMaintenanceSvc_*','MessagingService','MessagingService_*') -Info 'Sets installed per-user sync, connected-device, contacts, calendar, and messaging services to Manual. Windows creates per-user service instances for sessions; this does not promise a fixed process count.'
@@ -1531,6 +1536,7 @@ $script:Tweaks += (New-Tweak -Id 'startup.epic' -Tab 'Tweaks' -SubTab 'Startup a
 $script:Tweaks += (New-Tweak -Id 'startup.battlenet' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Game launchers' -Label 'Disable Battle.net startup' -Risk 'Safe' -Detect @{kind='runkey';name='Battle.net'} -Apply @(@{kind='runkey';name='Battle.net';remove=$true}) -Revert @() -Info 'Stops Battle.net from starting with Windows. Blizzard games remain available when launched manually.')
 $script:Tweaks += (New-Tweak -Id 'startup.ea' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Game launchers' -Label 'Disable EA app startup' -Risk 'Safe' -Detect @{kind='runkey';name='EADesktop'} -Apply @(@{kind='runkey';name='EADesktop';remove=$true}) -Revert @() -Info 'Stops the EA app from starting with Windows. EA games remain available when launched manually.')
 $script:Tweaks += (New-Tweak -Id 'startup.ubisoft' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Game launchers' -Label 'Disable Ubisoft Connect startup' -Risk 'Safe' -Detect @{kind='runkey';name='Uplay'} -Apply @(@{kind='runkey';name='Uplay';remove=$true}) -Revert @() -Info 'Stops Ubisoft Connect from starting with Windows. Ubisoft games remain available when launched manually.')
+$script:Tweaks += (New-Tweak -Id 'task.office.telemetry' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Telemetry and diagnostics' -Label 'Turn off Microsoft Office telemetry' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('OfficeTelemetryAgent*')} -Apply @(@{kind='taskNamePattern';patterns=@('OfficeTelemetryAgent*')},@{kind='registry';path='HKCU:\Software\Policies\Microsoft\office\16.0\common';name='qmenable';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Policies\Microsoft\office\16.0\common';name='sendcustomerdata';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Office\Common\ClientTelemetry';name='DisableTelemetry';value=1;type='DWord'}) -Revert @(@{kind='taskNamePattern';patterns=@('OfficeTelemetryAgent*');enable=$true},@{kind='registryDel';path='HKCU:\Software\Policies\Microsoft\office\16.0\common';name='qmenable'},@{kind='registryDel';path='HKCU:\Software\Policies\Microsoft\office\16.0\common';name='sendcustomerdata'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Office\Common\ClientTelemetry';name='DisableTelemetry'}) -Info 'Only shown when Microsoft Office is installed. Disables the Office telemetry agent tasks that run at sign-in and on a schedule, and turns off the Office customer experience program and client telemetry upload. Office, its updates and activation keep working.')
 $script:Tweaks += (New-Tweak -Id 'task.gpu.nv.reports' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable NVIDIA crash and telemetry report tasks' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('NvTmRep*','NvTmMon*')} -Apply @(@{kind='taskNamePattern';patterns=@('NvTmRep*','NvTmMon*')}) -Revert @(@{kind='taskNamePattern';patterns=@('NvTmRep*','NvTmMon*');enable=$true}) -Info 'NVIDIA crash-report and telemetry upload tasks. The driver keeps working; NVIDIA just stops receiving these reports.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.nv.updates' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable NVIDIA driver and app update checks' -Risk 'Moderate' -Detect @{kind='taskAnyNamePattern';patterns=@('NvDriverUpdateCheckDaily*','NVIDIA GeForce Experience SelfUpdate*','NvNodeLauncher*')} -Apply @(@{kind='taskNamePattern';patterns=@('NvDriverUpdateCheckDaily*','NVIDIA GeForce Experience SelfUpdate*','NvNodeLauncher*')}) -Revert @(@{kind='taskNamePattern';patterns=@('NvDriverUpdateCheckDaily*','NVIDIA GeForce Experience SelfUpdate*','NvNodeLauncher*');enable=$true}) -Info 'Daily NVIDIA driver/app update checks. You will need to check for driver updates yourself in the NVIDIA app or on nvidia.com.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.nv.profiles' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable NVIDIA game profile updater' -Risk 'Moderate' -Detect @{kind='taskAnyNamePattern';patterns=@('NvProfileUpdaterDaily*','NvProfileUpdaterOnLogon*')} -Apply @(@{kind='taskNamePattern';patterns=@('NvProfileUpdaterDaily*','NvProfileUpdaterOnLogon*')}) -Revert @(@{kind='taskNamePattern';patterns=@('NvProfileUpdaterDaily*','NvProfileUpdaterOnLogon*');enable=$true}) -Info 'Downloads updated per-game driver profiles between driver releases. New driver installs still bring the latest profiles.' )
@@ -1617,7 +1623,7 @@ $script:Tweaks += (New-Tweak -Id 'feat.cloud.onedrive' -Tab 'Tweaks' -SubTab 'Fe
 
 $script:Tweaks += (New-Tweak -Id 'feat.privacy.settingsads' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Turn off suggested content in Settings' -Risk 'Safe' -Recommend $true -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-338393Enabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-353694Enabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-353696Enabled';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-338393Enabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-353694Enabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-353696Enabled'}) -Info 'Same as Settings > Privacy and security > General > Show me suggested content in the Settings app.')
 $script:Tweaks += (New-Tweak -Id 'feat.privacy.tips' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Turn off tips and suggestions notifications' -Risk 'Safe' -Recommend $true -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-338389Enabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-310093Enabled';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-338389Enabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SubscribedContent-310093Enabled'}) -Info 'Stops "Get tips and suggestions when using Windows" notifications and the post-update Windows welcome experience.')
-$script:Tweaks += (New-Tweak -Id 'feat.privacy.silentapps' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Stop automatic installs of suggested apps' -Risk 'Safe' -Recommend $true -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SilentInstalledAppsEnabled';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SilentInstalledAppsEnabled'}) -Info 'Stops Windows from silently installing promoted Store apps and games for this user.')
+$script:Tweaks += (New-Tweak -Id 'feat.privacy.silentapps' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Stop automatic installs of suggested apps' -Risk 'Safe' -Recommend $true -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SilentInstalledAppsEnabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='PreInstalledAppsEnabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='PreInstalledAppsEverEnabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='OemPreInstalledAppsEnabled';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='SilentInstalledAppsEnabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='PreInstalledAppsEnabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='PreInstalledAppsEverEnabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='OemPreInstalledAppsEnabled'}) -Info 'Stops Windows and the PC maker from silently installing promoted Store apps and games (the ones that reappear in Start after debloating) for this user.')
 $script:Tweaks += (New-Tweak -Id 'feat.privacy.speech' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Turn off online speech recognition' -Risk 'Moderate' -Recommend $false -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy';name='HasAccepted';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy';name='HasAccepted'}) -Info 'Same as Settings > Privacy and security > Speech. Voice typing uses only on-device recognition, which is less accurate.')
 $script:Tweaks += (New-Tweak -Id 'feat.privacy.langlist' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Hide your language list from websites' -Risk 'Safe' -Recommend $true -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Control Panel\International\User Profile';name='HttpAcceptLanguageOptOut';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Control Panel\International\User Profile';name='HttpAcceptLanguageOptOut'}) -Info 'Same as Settings > Privacy and security > General > Let websites show me locally relevant content by accessing my language list.')
 
@@ -1694,6 +1700,7 @@ $script:Tweaks += (New-Tweak -Id 'gpu.mpo.minfps' -Tab 'GPU' -SubTab '' -Group '
 $script:Tweaks += (New-Tweak -Id 'gpu.gamemode' -Tab 'GPU' -SubTab '' -Group 'Windows' -Label 'Windows Game Mode' -Risk 'Safe' -Type 'dropdown' -Options @('Default','On','Off') -Detect @{kind='registry';path='HKCU:\Software\Microsoft\GameBar';name='AutoGameModeEnabled'} -Info 'Game Mode limits background update/notification interruptions during games. It is normally safe to leave enabled; results vary by workload and Windows build.')
 $script:Tweaks += (New-Tweak -Id 'gpu.amd.ulps' -Tab 'GPU' -SubTab '' -Group 'AMD' -Label 'Disable ULPS (AMD)' -Risk 'Moderate' -Detect @{kind='vendor';value='AMD'} -Apply @(@{kind='amdUlps';enable=$false}) -Revert @(@{kind='amdUlps';enable=$true}) -Info 'Ultra Low Power State can cause downclock stutter on multi-GPU/high-refresh setups. Applies to detected AMD Radeon adapters only.')
 $script:Tweaks += (New-Tweak -Id 'gpu.msi' -Tab 'GPU' -SubTab '' -Group 'Interrupts' -Label 'Turn on MSI mode for the graphics card and network adapters' -Risk 'Moderate' -Detect @{kind='msiCapable'} -Apply @(@{kind='msiMode';enable=$true}) -Revert @(@{kind='msiMode';enable=$false}) -Info 'Sets MSISupported=1 for each graphics card and physical Ethernet/Wi-Fi adapter whose hardware supports MSI or MSI-X. Line-based interrupts can be shared, so every sharing driver must check whether the interrupt was its own; MSI gives each device its own interrupt. The status shows the mode each device really uses. AMD, Intel, Realtek, MediaTek and recent NVIDIA drivers already use MSI, so nothing changes for them. Interrupt priority is not changed (Windows treats it only as a hint), and storage and USB controllers are left alone because a wrong mode on the boot drive controller can stop Windows from starting. Pick devices in Apply. Restart required.' -Note 'Restart required')
+$script:Tweaks += (New-Tweak -Id 'gpu.vrr.windowed' -Tab 'GPU' -SubTab '' -Group 'Windows' -Label 'Turn off variable refresh rate for windowed games' -Risk 'Safe' -Recommend $false -Detect @{kind='osBuild';min=22000;reason='Needs Windows 11'} -Apply @(@{kind='dxGlobal';name='VRROptimizeEnable';value='0'}) -Revert @(@{kind='dxGlobal';name='VRROptimizeEnable';value=$null}) -Info 'The Settings > Display > Graphics "Variable refresh rate" switch. A fix, not a speed-up: use it only if borderless or windowed games flicker or stutter on a FreeSync / G-SYNC monitor. Fullscreen games are not affected.' -Warn 'FreeSync / G-SYNC stops working in borderless and windowed games that do not support it on their own.')
 $script:Tweaks += (New-Tweak -Id 'gpu.windowed' -Tab 'GPU' -SubTab '' -Group 'Windows' -Label 'Optimizations for windowed games' -Risk 'Safe' -Detect @{kind='osBuild';min=22000;reason='Needs Windows 11'} -Apply @(@{kind='dxGlobal';name='SwapEffectUpgradeEnable';value='1'}) -Revert @(@{kind='dxGlobal';name='SwapEffectUpgradeEnable';value=$null}) -Info 'The Settings > Display > Graphics switch. Lets DirectX 10/11 games in windowed or borderless mode use the flip presentation model, which lowers latency and enables VRR. Unticking restores the previous setting.')
 $script:RecognizedGames = @(Get-RecognizedGames)
 $gameList = (@($script:RecognizedGames | ForEach-Object { $_.Name }) -join ', ')
@@ -1854,7 +1861,9 @@ $script:Tweaks += (New-RegRow -Id 'feat.ai.agents' -SubTab 'Features' -Group 'AI
 $script:Tweaks += (New-RegRow -Id 'feat.shell.bingstart' -SubTab 'Features' -Group 'Start, taskbar and search' -Label 'Turn off Bing web results and Cortana in Start' -Risk 'Safe' -Detect @{kind='registry'} -Values @(
     @('HKCU:\Software\Policies\Microsoft\Windows\Explorer','DisableSearchBoxSuggestions',1),
     @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Search','BingSearchEnabled',0),
-    @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search','AllowCortana',0)
+    @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search','AllowCortana',0),
+    @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search','DisableWebSearch',1),
+    @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search','ConnectedSearchUseWeb',0)
 ) -Info 'Start and taskbar search show only apps, settings and files on this PC: no Bing web results, web suggestions or Cortana. Typing in Start still works normally.')
 $script:Tweaks += (New-RegRow -Id 'feat.privacy.spotlight' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Turn off Spotlight and third-party suggestions' -Risk 'Safe' -Detect @{kind='registry'} -Values @(
     @($cc,'DisableWindowsSpotlightFeatures',1),
@@ -1901,6 +1910,9 @@ $script:Tweaks += (New-RegRow -Id 'feat.privacy.quickaccess' -SubTab 'Features' 
     @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced','Start_TrackDocs',0)
 ) -Info 'File Explorer Quick Access and the Start menu stop listing your recently opened files and most-used folders. The files are not touched.')
 $script:Tweaks += (New-Tweak -Id 'adv.ui.animations' -Tab 'Tweaks' -SubTab 'Features' -Group 'Background and power' -Label 'Turn off window and taskbar animations' -Risk 'Safe' -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Control Panel\Desktop\WindowMetrics';name='MinAnimate';value='0';type='String'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced';name='TaskbarAnimations';value=0;type='DWord'}) -Info 'Turns off "Animate windows when minimizing and maximizing" and "Animations in the taskbar" (System Properties > Performance Options). Windows open, minimise and restore instantly instead of after a short animation, so the desktop feels faster. In-game FPS does not change. Takes effect after signing out. Unticking restores the previous values.' -Warn 'Purely visual: windows snap open and closed with no motion.')
+$script:Tweaks += (New-Tweak -Id 'feat.sys.hibernate' -Tab 'Tweaks' -SubTab 'Features' -Group 'Background and power' -Label 'Turn off hibernation' -Risk 'Moderate' -Recommend $false -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Power';name='HibernateEnabled';value=0;type='DWord'}) -Revert @(@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Power';name='HibernateEnabled';value=1;type='DWord'}) -Info 'Turns hibernation off after the next restart and frees the space hiberfil.sys takes on the system drive (often 6-25 GB, about 40% of your RAM). Sleep keeps working. Unticking turns hibernation back on.' -Warn 'Hibernate and Fast startup stop working, and a laptop can no longer hibernate when its battery runs low.')
+$script:Tweaks += (New-Tweak -Id 'feat.lighting.off' -Tab 'Tweaks' -SubTab 'Features' -Group 'Background and power' -Label 'Turn off Windows Dynamic Lighting' -Risk 'Safe' -Recommend $false -Detect @{kind='registry';minBuild=22631} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Lighting';name='AmbientLightingEnabled';value=0;type='DWord'}) -Revert @(@{kind='registry';path='HKCU:\Software\Microsoft\Lighting';name='AmbientLightingEnabled';value=1;type='DWord'}) -Info 'Stops Windows from controlling RGB keyboards, mice and light strips. Use it with iCUE, Armoury Crate, G HUB, SignalRGB or OpenRGB: when Windows and the vendor app both drive the same device, colors flicker or settings do not stick.' -Warn 'Device lighting can no longer be changed in Windows Settings; your RGB app keeps full control.')
+$script:Tweaks += (New-Tweak -Id 'feat.taskbar.simple' -Tab 'Tweaks' -SubTab 'Features' -Group 'Start, taskbar and search' -Label 'Hide Task View and show search as an icon' -Risk 'Safe' -Recommend $false -Detect @{kind='registry';minBuild=22000} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced';name='ShowTaskViewButton';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search';name='SearchboxTaskbarMode';value=1;type='DWord'}) -Revert @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced';name='ShowTaskViewButton';value=1;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search';name='SearchboxTaskbarMode';value=2;type='DWord'}) -Info 'Removes the Task View button and shrinks the search box to an icon, leaving more room for pinned apps. Win+Tab and Win+S still open both.' -Warn 'Only changes how the taskbar looks.')
 $script:Tweaks += (New-Tweak -Id 'feat.shell.startdelay' -Tab 'Tweaks' -SubTab 'Features' -Group 'Background and power' -Label 'Remove the startup app delay' -Risk 'Moderate' -Recommend $false -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize';name='StartupDelayInMSec';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize';name='WaitForIdleState';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize';name='StartupDelayInMSec'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize';name='WaitForIdleState'}) -Warn 'Startup apps launch immediately instead of a few seconds after sign-in, so the desktop can feel busier and less responsive for the first moments after login.' -Info 'Removes the roughly 10-second delay Windows adds before launching startup apps, and stops Explorer waiting for the PC to go idle first. They open right away at sign-in. Best only once you have trimmed startup apps.')
 
 $script:Tweaks += New-ServiceGroup -Id 'svc.xbox.manual' -Tab 'Tweaks' -SubTab 'Services' -Group 'Xbox and gaming' -Label 'Set Xbox Live services to on-demand (keeps Game Pass)' -Risk 'Moderate' -StartType 'Manual' -RevertType 'Manual' -Services @('XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc') -Info 'Sets the Xbox Live sign-in, cloud save, networking and accessory services to Manual instead of disabling them: they start when a Game Pass or Store game or the Xbox app needs them, and stay stopped the rest of the time. Use this instead of the "Stop Xbox Live and accessory services" row if you still play Xbox/Game Pass games.'
@@ -2024,10 +2036,14 @@ $script:Tweaks += (New-RegRow -Id 'adv.wpbt' -Tab 'Advanced' -SubTab '' -Group '
     @('HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager','DisableWpbtExecution',1)
 ) -Info 'The Windows Platform Binary Table lets a motherboard or laptop BIOS drop a program into Windows at every boot; this is how ASUS Armoury Crate, Lenovo and some OEM updaters reinstall themselves after being removed. Setting DisableWpbtExecution stops Windows from running it. Drivers and normal installers are unaffected. Unticking allows it again.')
 ($script:Tweaks | Where-Object { $_.Id -eq 'adv.wpbt' }).Warn = 'OEM tools that the BIOS installs on every boot (Armoury Crate, vendor updaters) stop coming back; install them manually if you want them.'
+$script:Tweaks += (New-Tweak -Id 'sec.remoteassist' -Tab 'Security' -SubTab '' -Group 'Remote access' -Label 'Turn off Remote Assistance' -Risk 'Safe' -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance';name='fAllowToGetHelp';value=0;type='DWord'},@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance';name='fAllowFullControl';value=0;type='DWord'}) -Revert @(@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance';name='fAllowToGetHelp';value=1;type='DWord'},@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance';name='fAllowFullControl';value=1;type='DWord'}) -Info 'Closes the old Remote Assistance feature (System Properties > Remote), which is allowed by default and lets an invited helper view and control the PC. Quick Assist and Remote Desktop are separate and keep working.' -Warn 'Remote Assistance invitations (msra.exe) from a helper stop working.')
 $script:Tweaks += (New-RegRow -Id 'sec.wu.nodrivers' -Tab 'Security' -SubTab '' -Group 'Windows Update' -Label 'Do not install drivers through Windows Update' -Risk 'Moderate' -Detect @{kind='registry'} -Values @(
     @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate','ExcludeWUDriversInQualityUpdate',1),
     @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\Device Metadata','PreventDeviceMetadataFromNetwork',1)
-) -Info 'Windows Update stops replacing your GPU, chipset and audio drivers with older generic ones, and Device Manager stops downloading device icons and info. Security and feature updates still install, and NVIDIA, AMD, Intel and chipset installers work normally. Unticking lets Windows Update offer drivers again.')
+) -Info 'Windows Update stops replacing your GPU, chipset and audio drivers with older generic ones, plugging in a new device no longer pulls a driver from Windows Update, and Device Manager stops downloading device icons and info. Security and feature updates still install, and NVIDIA, AMD, Intel and chipset installers work normally. Unticking lets Windows Update offer drivers again.')
+$wuNd = $script:Tweaks | Where-Object { $_.Id -eq 'sec.wu.nodrivers' }
+$wuNd.Apply = @($wuNd.Apply) + @(@{kind='registry';path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching';name='SearchOrderConfig';value=0;type='DWord'})
+$wuNd.Revert = @($wuNd.Revert) + @(@{kind='registry';path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching';name='SearchOrderConfig';value=1;type='DWord'})
 ($script:Tweaks | Where-Object { $_.Id -eq 'sec.wu.nodrivers' }).Warn = 'You have to install and update GPU, chipset, Wi-Fi and other drivers yourself from the maker.'
 $kbKey = 'HKCU:\Control Panel\Keyboard'
 $script:Tweaks += (New-Tweak -Id 'adv.input.keyrepeat' -Tab 'Advanced' -SubTab '' -Group 'Input devices' -Label 'Fastest keyboard repeat delay and rate' -Risk 'Safe' -Recommend $false -Detect @{kind='registry'} -Apply @(
@@ -2087,15 +2103,6 @@ $script:Tweaks += (New-Tweak -Id 'adv.input.numlock' -Tab 'Advanced' -SubTab '' 
     @{kind='registry';path=$kbHkcu;name='InitialKeyboardIndicators';value='0';type='String'},
     @{kind='registry';path=$kbLogon;name='InitialKeyboardIndicators';value='2147483648';type='String'}
 ) -Info 'Num Lock starts on, so a PIN typed on the number pad works on the sign-in screen. Fast Startup can keep the previous state until a full restart.')
-$wv2 = 'HKLM:\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\8\1694661260'
-$script:Tweaks += (New-RegRow -Id 'feat.search.webview2' -SubTab 'Features' -Group 'Start, taskbar and search' -Label 'Stop Windows Search from starting Edge WebView2 processes' -Risk 'Moderate' -Recommend $false -Detect @{kind='registry';minBuild=22000} -Values @(
-    @($wv2,'EnabledState',1),
-    @($wv2,'EnabledStateOptions',0),
-    @($wv2,'Variant',0),
-    @($wv2,'VariantPayload',0),
-    @($wv2,'VariantPayloadKind',0)
-) -Info 'SearchHost.exe renders the Start and taskbar search panel with Edge WebView2, which keeps several msedgewebview2.exe processes and their memory alive. This Feature Management override (feature ID 37926450) switches that renderer off so search uses the plain list. Restart to apply; unticking removes the override.')
-($script:Tweaks | Where-Object { $_.Id -eq 'feat.search.webview2' }).Warn = 'Uses an undocumented Windows feature override: a Windows update can ignore or change it, and the search panel loses web previews and highlights.'
 $script:Tweaks += (New-RegRow -Id 'feat.taskbar.endtask' -SubTab 'Features' -Group 'Start, taskbar and search' -Label 'Add "End task" to the taskbar right-click menu' -Risk 'Safe' -Detect @{kind='registry';minBuild=22631} -Values @(
     @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings','TaskbarEndTask',1)
 ) -Info 'Windows 11 23H2+ developer option (Settings > System > For developers > End task): right-clicking a taskbar app shows End task, which kills a frozen game or app instantly without opening Task Manager.')
@@ -2317,7 +2324,7 @@ foreach ($t in $script:Tweaks) { if ($script:WarnText.ContainsKey($t.Id)) { $t.W
 $script:NotRecommended = @(
     'gpu.mpo','gpu.mpo.minfps','cpu.parking','app.discord.hwaccel','sec.storebackground',
     'net.teredo','net.netbios','net.multihomed',
-    'svc.dev.pairing','svc.bg.appr','svc.net.discovery','svc.feat.notifications',
+    'svc.dev.pairing','svc.net.discovery','svc.feat.notifications',
     'svc.vendor.asus','svc.dev.hotkey','svc.dev.hdhotkey',
     'mem.pagecombining','mem.compression','cpu.ppm.minstate','cpu.ppm.idle','startup.all',
     'cpu.ppm.hetero','cpu.ppm.perfepp','feat.privacy.appperms','svc.xbox.manual','feat.shell.hiddenfiles','feat.shell.startdelay'
@@ -2327,7 +2334,7 @@ foreach ($t in $script:Tweaks) {
         $t.Revert = @($t.Apply | ForEach-Object { @{kind='powerSetting';sub=$_.sub;setting=$_.setting;value='Default';label=$_.label} })
     }
 }
-$script:LaptopRisky = @('svc.vendor.asus','svc.dev.hotkey','svc.dev.hdhotkey','vendor.asus','vendor.msi','vendor.gigabyte','vendor.lenovo','vendor.dell','vendor.hp','vendor.acer')
+$script:LaptopRisky = @('feat.sys.hibernate','svc.vendor.asus','svc.dev.hotkey','svc.dev.hdhotkey','vendor.asus','vendor.msi','vendor.gigabyte','vendor.lenovo','vendor.dell','vendor.hp','vendor.acer')
 $script:BuiltOnLaptop = Test-IsLaptop
 if ($script:BuiltOnLaptop) {
     $script:NotRecommended += 'pwr.pcie.aspm','pwr.usb.suspend','feat.privacy.findmydevice','gpu.games.highperf','cpu.games.nothrottle','cpu.powermode.best'
@@ -2391,7 +2398,7 @@ foreach ($t in $script:Tweaks) {
 
 $script:LowerFpsIds = @('gpu.mpo','cpu.ppm.idle','cpu.ppm.idledepth','cpu.parking')
 $script:RiskyIds = @('feat.net.wifi','feat.net.eth','svc.dev.print','svc.dev.bluetooth','svc.dev.webcam','svc.dev.pairing','sec.updates','sec.defender','sec.encryption.decrypt','svc.feat.account','svc.feat.hello','feat.opt.hypervisor','feat.cloud.onedrive','svc.feat.notifications','svc.feat.bitlocker','svc.feat.family','gpu.mpo','cpu.ppm.idle','cpu.ppm.idledepth','cpu.parking','net.wifi.location','feat.privacy.appperms')
-$script:ModerateIds = @('svc.xbox.live','task.xblgamesave','net.intmod','gpu.hags','gpu.msi','gpu.mpo.minfps','gpu.amd.ulps','cpu.boost','cpu.ppm.responsive','cpu.ppm.throttle','cpu.ppm.minstate','cpu.ppm.hetero','cpu.ppm.perfepp','cpu.ppm.maxfreq','cpu.amd.x3dcache','mem.compression','mem.pagecombining','svc.bg.sysmain','pwr.pcie.aspm','pwr.usb.suspend','input.usb.power','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.appr','svc.bg.servicing','net.autotune','feat.opt.media','svc.net.iphlp','svc.feat.phishing','svc.dev.printbroker','task.familysafety')
+$script:ModerateIds = @('feat.sys.hibernate','svc.xbox.live','task.xblgamesave','net.intmod','gpu.hags','gpu.msi','gpu.mpo.minfps','gpu.amd.ulps','cpu.boost','cpu.ppm.responsive','cpu.ppm.throttle','cpu.ppm.minstate','cpu.ppm.hetero','cpu.ppm.perfepp','cpu.ppm.maxfreq','cpu.amd.x3dcache','mem.compression','mem.pagecombining','svc.bg.sysmain','pwr.pcie.aspm','pwr.usb.suspend','input.usb.power','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','net.autotune','feat.opt.media','svc.net.iphlp','svc.feat.phishing','svc.dev.printbroker','task.familysafety')
 foreach ($t in $script:Tweaks) {
     if ($t.Type -eq 'info') { continue }
     $t.Risk = if ($script:RiskyIds -contains $t.Id) { 'Risky' } elseif ($script:ModerateIds -contains $t.Id) { 'Moderate' } else { 'Safe' }
@@ -4183,6 +4190,31 @@ $script:MicrosoftAppCatalog = @(
     @{ Name='Microsoft Photos'; ProductId='9WZDNCRFJBH4'; Packages=@('Microsoft.Windows.Photos') }
     @{ Name='Windows Calculator'; ProductId='9WZDNCRFHVN5'; Packages=@('Microsoft.WindowsCalculator') }
 )
+$script:ReinstallCatalog = @($script:MicrosoftAppCatalog) + @(
+    @{ Name='Notepad'; ProductId='9MSMLRH6LZF3'; Packages=@('Microsoft.WindowsNotepad') }
+    @{ Name='Windows Terminal'; ProductId='9N0DX20HK701'; Packages=@('Microsoft.WindowsTerminal') }
+    @{ Name='Paint'; ProductId='9PCFS5B6T72H'; Packages=@('Microsoft.Paint') }
+    @{ Name='Clock'; ProductId='9WZDNCRFJ3PR'; Packages=@('Microsoft.WindowsAlarms') }
+    @{ Name='Camera'; ProductId='9WZDNCRFJBBG'; Packages=@('Microsoft.WindowsCamera') }
+    @{ Name='Sound Recorder'; ProductId='9WZDNCRFHWKN'; Packages=@('Microsoft.WindowsSoundRecorder') }
+    @{ Name='Media Player'; ProductId='9WZDNCRFJ3PT'; Packages=@('Microsoft.ZuneMusic') }
+    @{ Name='Microsoft To Do'; ProductId='9NBLGGH5R558'; Packages=@('Microsoft.Todos') }
+    @{ Name='Sticky Notes'; ProductId='9NBLGGH4QGHW'; Packages=@('Microsoft.MicrosoftStickyNotes') }
+    @{ Name='MSN Weather'; ProductId='9WZDNCRFJ3Q2'; Packages=@('Microsoft.BingWeather') }
+    @{ Name='Clipchamp'; ProductId='9P1J8S7CCWWT'; Packages=@('Clipchamp.Clipchamp') }
+    @{ Name='Phone Link'; ProductId='9NMPJ99VJBWV'; Packages=@('Microsoft.YourPhone') }
+    @{ Name='Feedback Hub'; ProductId='9NBLGGH4R32N'; Packages=@('Microsoft.WindowsFeedbackHub') }
+    @{ Name='Get Help'; ProductId='9PKDZBMV1H3T'; Packages=@('Microsoft.GetHelp') }
+    @{ Name='Quick Assist'; ProductId='9P7BP5VNWKX5'; Packages=@('MicrosoftCorporationII.QuickAssist') }
+    @{ Name='Outlook (new)'; ProductId='9NRX63209R7B'; Packages=@('Microsoft.OutlookForWindows') }
+    @{ Name='HEIF Image Extension'; ProductId='9PMMSR1CGPWG'; Packages=@('Microsoft.HEIFImageExtension') }
+    @{ Name='Web Media Extensions'; ProductId='9N5TDP8VCMHS'; Packages=@('Microsoft.WebMediaExtensions') }
+    @{ Name='VP9 Video Extensions'; ProductId='9N4D0MSMP0PT'; Packages=@('Microsoft.VP9VideoExtensions') }
+    @{ Name='AV1 Video Extension'; ProductId='9MVZQVXJBQ9V'; Packages=@('Microsoft.AV1VideoExtension') }
+    @{ Name='WebP Image Extension'; ProductId='9PG2DK419DRG'; Packages=@('Microsoft.WebpImageExtension') }
+    @{ Name='Raw Image Extension'; ProductId='9NCTDW2W1BH8'; Packages=@('Microsoft.RawImageExtension') }
+)
+$script:ReinstallChecks = @()
 
 function Get-RionWingetPath {
     $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -4194,12 +4226,26 @@ function Get-RionWingetPath {
         $exe = Join-Path $installer.InstallLocation 'winget.exe'
         if (Test-Path $exe) { return $exe }
     }
+    try {
+        Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop
+        $installer = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) | Select-Object -First 1
+        if ($installer -and $installer.InstallLocation -and (Test-Path (Join-Path $installer.InstallLocation 'winget.exe'))) { Write-Log 'WinGet was registered again from the App Installer already on this PC.' 'Success'; return (Join-Path $installer.InstallLocation 'winget.exe') }
+    } catch { }
     $bundle = Join-Path $env:TEMP ("RionTool-AppInstaller-{0}.msixbundle" -f [guid]::NewGuid().ToString('N'))
     try {
         Write-Log 'WinGet is missing; downloading Microsoft App Installer from aka.ms/getwinget...' 'Action'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri 'https://aka.ms/getwinget' -OutFile $bundle -UseBasicParsing -TimeoutSec 180
-        Add-AppxPackage -Path $bundle -ErrorAction Stop
+        try { Add-AppxPackage -Path $bundle -ErrorAction Stop }
+        catch {
+            Write-Log ('App Installer needs its runtime packages first ({0}); adding them.' -f $_.Exception.Message) 'Action'
+            $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+            foreach ($dep in @(("https://aka.ms/Microsoft.VCLibs.{0}.14.00.Desktop.appx" -f $arch),("https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.{0}.appx" -f $arch))) {
+                $depFile = Join-Path $env:TEMP ("RionTool-dep-{0}.appx" -f [guid]::NewGuid().ToString('N'))
+                try { Invoke-WebRequest -Uri $dep -OutFile $depFile -UseBasicParsing -TimeoutSec 180; Add-AppxPackage -Path $depFile -ErrorAction Stop } catch { Write-Log ('Runtime package {0}: {1}' -f $dep,$_.Exception.Message) 'Info' } finally { Remove-Item -LiteralPath $depFile -Force -ErrorAction SilentlyContinue }
+            }
+            Add-AppxPackage -Path $bundle -ErrorAction Stop
+        }
         $deadline = (Get-Date).AddSeconds(15)
         do {
             $installer = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) | Select-Object -First 1
@@ -4261,7 +4307,12 @@ function Install-StoreProduct {
         Write-Log ("Installing {0} ({1}) through WinGet; no Store window will open." -f $Name,$ProductId) 'Action'
         $args = "install --id $ProductId --source msstore --accept-package-agreements --accept-source-agreements --silent --disable-interactivity --force"
         $proc = Start-Process -FilePath $winget -ArgumentList $args -Wait -PassThru -NoNewWindow -ErrorAction Stop
-        if ($proc.ExitCode -ne 0) { throw ("WinGet failed with exit code {0} for {1}." -f $proc.ExitCode,$Name) }
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -notin -1978335189,-1978335135) {
+            Write-Log ("WinGet returned {0} for {1}; resetting its sources and trying once more." -f $proc.ExitCode,$Name) 'Warn'
+            Start-Process -FilePath $winget -ArgumentList 'source reset --force --disable-interactivity' -Wait -WindowStyle Hidden | Out-Null
+            $proc = Start-Process -FilePath $winget -ArgumentList $args -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -notin -1978335189,-1978335135) { throw ("WinGet failed with exit code {0} for {1}." -f $proc.ExitCode,$Name) }
+        }
         Write-Log ("WinGet installed {0}. Windows Update startup state will now be restored." -f $Name) 'Success'
     } finally { Restore-TemporaryStoreServices -Snapshot $snapshot }
 }
@@ -4413,10 +4464,127 @@ function Repair-StartSearch {
     }
     Enable-ScheduledTask -TaskPath '\Microsoft\Windows\TextServicesFramework\' -TaskName 'MsCtfMonitor' -ErrorAction SilentlyContinue | Out-Null
     if (-not (Get-Process ctfmon -ErrorAction SilentlyContinue)) { Start-Process "$env:SystemRoot\System32\ctfmon.exe" -ErrorAction SilentlyContinue }
+    $wv2Key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\8\1694661260'
+    if (Test-Path -LiteralPath $wv2Key) { Remove-Item -LiteralPath $wv2Key -Recurse -Force -ErrorAction SilentlyContinue; Write-Log 'Removed the Windows Search WebView2 override; the search panel uses its normal renderer again after a restart.' 'Success' }
+    if ((Test-ServiceExists 'TextInputManagementService') -and (Get-ServiceStartValue 'TextInputManagementService') -ne 2) { Set-ServiceStartNow -Name 'TextInputManagementService' -Start 2; Start-Service -Name 'TextInputManagementService' -ErrorAction SilentlyContinue }
+    $ctfTask = Get-ScheduledTask -TaskPath '\Microsoft\Windows\TextServicesFramework\' -TaskName 'MsCtfMonitor' -ErrorAction SilentlyContinue
+    if (-not $ctfTask -or [string]$ctfTask.State -eq 'Disabled') { Set-RegValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ctfmon' -Value (Join-Path $env:SystemRoot 'System32\ctfmon.exe') -Type String; Write-Log 'The text input task could not be turned back on, so ctfmon now starts from the Run key at sign-in.' 'Info' }
+    foreach ($pn in 'Microsoft.Windows.StartMenuExperienceHost','MicrosoftWindows.Client.CBS','Microsoft.Windows.ShellExperienceHost') {
+        foreach ($pk in @(Get-AppxPackage -AllUsers -Name $pn -ErrorAction SilentlyContinue)) {
+            $mf = Join-Path ([string]$pk.InstallLocation) 'AppxManifest.xml'
+            if (Test-Path -LiteralPath $mf) { try { Add-AppxPackage -DisableDevelopmentMode -Register $mf -ErrorAction Stop } catch { } }
+        }
+    }
     Get-Process SearchHost,SearchApp,StartMenuExperienceHost,TextInputHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Write-Log 'Start and Search can run in the background again and the text input service is running. Press Windows and type to test; sign out once if it still needs a click.' 'Success'
 }
 
+$script:ExtraPlaceboValues = @(
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'; Pattern='^TdrLevel$'; Bad={ param($x) [int]$x -ne 3 }; Default=$null; Sev='warn'; Title='GPU timeout recovery changed'; Why='TdrLevel other than the default turns off or changes GPU hang recovery: a driver hang then freezes or blue-screens the PC instead of recovering in a few seconds.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers'; Pattern='^TdrDelay$'; Bad={ param($x) [int]$x -gt 10 }; Default=$null; Sev='info'; Title='GPU timeout delay raised'; Why='A long TdrDelay only hides a hung GPU for longer before Windows recovers it. Keep it only if a rendering or AI app told you to.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'; Pattern='^(TcpWindowSize|GlobalMaxTcpWindowSize)$'; Bad=$null; Default=$null; Sev='warn'; Title='TCP window size forced'; Why='A fixed TCP window overrides receive-window auto-tuning and caps download speed on fast connections. It does nothing for game ping, which runs over UDP.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'; Pattern='^Tcp1323Opts$'; Bad={ param($x) [int]$x -eq 0 }; Default=$null; Sev='warn'; Title='TCP window scaling turned off'; Why='Tcp1323Opts=0 turns off TCP window scaling, which limits downloads on fast connections. The Windows default already has it on.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'; Pattern='^(TcpTimedWaitDelay|MaxUserPort|DefaultTTL)$'; Bad=$null; Default=$null; Sev='info'; Title='Old TCP tweak-guide value'; Why='A server-tuning value from old guides. Games use UDP, so it has no effect on ping or FPS.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'; Pattern='^IRPStackSize$'; Bad=$null; Default=$null; Sev='info'; Title='File-sharing tweak-guide value'; Why='IRPStackSize only affects sharing files from this PC over the network. It does nothing for games or internet speed.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl'; Pattern='^IRQ\d+Priority$'; Bad=$null; Default=$null; Sev='info'; Title='IRQ priority tweak-guide value'; Why='IRQ priority values have had no effect since Windows 2000; the interrupt controller ignores them.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'; Pattern='^(SecondLevelDataCache|NonPagedPoolQuota|PagedPoolQuota)$'; Bad=$null; Default=$null; Sev='info'; Title='Old memory tweak-guide value'; Why='Ignored on 64-bit Windows 10 and 11; the memory manager sizes these itself.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'; Pattern='^MoveImages$'; Bad={ param($x) [int]$x -eq 0 }; Default=$null; Sev='warn'; Title='Address space randomization turned off'; Why='MoveImages=0 turns off ASLR for programs, which makes malware exploits much easier and gives no measurable FPS gain.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel'; Pattern='^DisableExceptionChainValidation$'; Bad={ param($x) [int]$x -eq 1 }; Default=$null; Sev='warn'; Title='Exception chain protection (SEHOP) turned off'; Why='Turning off SEHOP removes an exploit protection with no measurable FPS gain, and some anti-cheats check it.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel'; Pattern='^(DistributeTimers|ThreadDpcEnable|SerializeTimerExpiration|DpcWatchdogProfileOffset|MaximumSharedReadyQueueSize|DpcTimeout|DpcWatchdogPeriod)$'; Bad=$null; Default=$null; Sev='info'; Title='Undocumented kernel scheduler value'; Why='An undocumented kernel value from latency guides. Windows 11 overrides or ignores most of them, and some raise DPC latency under load. Measured gains are not repeatable.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Power'; Pattern='^CsEnabled$'; Bad={ param($x) [int]$x -eq 0 }; Default=$null; Sev='warn'; Title='Modern Standby turned off'; Why='On PCs that only support Modern Standby this removes Sleep entirely; on others it can break wake from sleep. It does not change gaming performance.' }
+    @{ Path='HKCU:\Control Panel\Desktop'; Pattern='^ForegroundLockTimeout$'; Bad={ param($x) [int]$x -lt 200000 }; Default=200000; Sev='warn'; Title='Apps can steal focus'; Why='A low ForegroundLockTimeout lets background apps and launchers pull focus away from your game mid-match and minimize it.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; Pattern='^EnableSuperfetch$'; Bad=$null; Default=$null; Sev='info'; Title='Old Superfetch value'; Why='A Windows Vista/7 value. Windows 10 and 11 ignore it; the SysMain service controls prefetching.' }
+    @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'; Pattern='^NtfsMemoryUsage$'; Bad=$null; Default=$null; Sev='info'; Title='Old NTFS memory value'; Why='Raises NTFS paged pool use for file servers. No effect on game loading on an SSD.' }
+)
+function Get-StartSearchProblems {
+    $why = @()
+    if (Test-Path -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\8\1694661260') { $why += 'the Windows Search WebView2 override is set' }
+    $ctfTask = Get-ScheduledTask -TaskPath '\Microsoft\Windows\TextServicesFramework\' -TaskName 'MsCtfMonitor' -ErrorAction SilentlyContinue
+    $ctfRun = [string](Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ctfmon' -ErrorAction SilentlyContinue).ctfmon
+    if ($ctfTask -and [string]$ctfTask.State -eq 'Disabled' -and -not $ctfRun) { $why += 'the text input task (MsCtfMonitor) is disabled' }
+    if ((Test-ServiceExists 'TextInputManagementService') -and (Get-ServiceStartValue 'TextInputManagementService') -eq 4) { $why += 'the Text Input Management service is disabled' }
+    if (-not (Get-Process ctfmon -ErrorAction SilentlyContinue)) { $why += 'ctfmon.exe is not running' }
+    $pol = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -ErrorAction SilentlyContinue
+    if ($pol -and [int]$pol.GetValue('LetAppsRunInBackground',0) -eq 2) {
+        $allow = @($pol.GetValue('LetAppsRunInBackground_ForceAllowTheseApps'))
+        if ($allow -notcontains 'MicrosoftWindows.Client.CBS_cw5n1h2txyewy' -or $allow -notcontains 'Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy') { $why += 'background apps are blocked without an exception for Start and Search' }
+    }
+    return $why
+}
+function Repair-WindowsUpdate {
+    foreach ($pair in @(@('wuauserv',3),@('UsoSvc',2),@('WaaSMedicSvc',3),@('BITS',3),@('DoSvc',2),@('CryptSvc',2),@('TrustedInstaller',3))) {
+        if ((Test-ServiceExists $pair[0]) -and (Get-ServiceStartValue $pair[0]) -eq 4) { try { Set-ServiceStartNow -Name $pair[0] -Start $pair[1]; Write-Log ('{0} turned back on.' -f $pair[0]) 'Success' } catch { Write-Log ('{0}: {1}' -f $pair[0],$_.Exception.Message) 'Warn' } }
+    }
+    $wu = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    foreach ($n in 'DisableWindowsUpdateAccess','DoNotConnectToWindowsUpdateInternetLocations','WUServer','WUStatusServer','SetDisableUXWUAccess') { Remove-RegValue -Path $wu -Name $n }
+    foreach ($n in 'NoAutoUpdate','UseWUServer') { Remove-RegValue -Path ($wu + '\AU') -Name $n }
+    foreach ($tp in '\Microsoft\Windows\WindowsUpdate\','\Microsoft\Windows\UpdateOrchestrator\') { foreach ($tk in @(Get-ScheduledTask -TaskPath $tp -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Disabled' })) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { } } }
+    foreach ($n in 'wuauserv','UsoSvc','BITS') { Start-Service -Name $n -ErrorAction SilentlyContinue }
+    Write-Log 'Windows Update is back on: its services, tasks and policies are at the Windows defaults. Your deferral and driver choices are kept.' 'Success'
+    Start-Process 'ms-settings:windowsupdate'
+}
+function Repair-Defender {
+    try { Invoke-Action @{ kind='defender'; enable=$true } } catch { Write-Log ('Defender restore: {0}' -f $_.Exception.Message) 'Warn' }
+    $wd = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+    foreach ($n in 'DisableAntiSpyware','DisableAntiVirus','DisableRoutinelyTakingAction') { Remove-RegValue -Path $wd -Name $n }
+    foreach ($n in 'DisableRealtimeMonitoring','DisableBehaviorMonitoring','DisableOnAccessProtection','DisableScanOnRealtimeEnable','DisableIOAVProtection') { Remove-RegValue -Path ($wd + '\Real-Time Protection') -Name $n }
+    foreach ($n in 'SpynetReporting','SubmitSamplesConsent','DisableBlockAtFirstSeen') { Remove-RegValue -Path ($wd + '\Spynet') -Name $n }
+    foreach ($tk in @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Disabled' })) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { } }
+    try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop } catch { }
+    Start-Service -Name 'SecurityHealthService' -ErrorAction SilentlyContinue
+    Write-Log 'Microsoft Defender policies were removed and its tasks turned back on. Restart, then check Windows Security; real-time protection comes back on by itself.' 'Success'
+    Start-Process 'windowsdefender://threat'
+}
+function Install-WingetPackage {
+    param([string]$Id,[string]$Name)
+    $winget = Get-RionWingetPath
+    $wgArgs = "install --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity"
+    Write-Log ('Installing {0} through WinGet...' -f $Name) 'Action'
+    $proc = Start-Process -FilePath $winget -ArgumentList $wgArgs -Wait -PassThru -WindowStyle Hidden
+    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -notin -1978335189,-1978335135) {
+        Start-Process -FilePath $winget -ArgumentList 'source reset --force --disable-interactivity' -Wait -WindowStyle Hidden | Out-Null
+        $proc = Start-Process -FilePath $winget -ArgumentList $wgArgs -Wait -PassThru -WindowStyle Hidden
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -notin -1978335189,-1978335135) { throw ('WinGet could not install {0} (exit code {1}).' -f $Name,$proc.ExitCode) }
+    }
+    Write-Log ('{0} is installed.' -f $Name) 'Success'
+}
+function Get-MissingRuntimes {
+    $miss = @()
+    if ([int](Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64' -Name Installed -ErrorAction SilentlyContinue).Installed -ne 1) { $miss += @{ Id='Microsoft.VCRedist.2015+.x64'; Name='Visual C++ 2015-2022 runtime (64-bit)' } }
+    if ([int](Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86' -Name Installed -ErrorAction SilentlyContinue).Installed -ne 1) { $miss += @{ Id='Microsoft.VCRedist.2015+.x86'; Name='Visual C++ 2015-2022 runtime (32-bit)' } }
+    if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\d3dx9_43.dll'))) { $miss += @{ Id='Microsoft.DirectX'; Name='DirectX End-User Runtime (DirectX 9-11 helper files)' } }
+    return $miss
+}
+function Install-GameRuntimes {
+    $miss = @(Get-MissingRuntimes)
+    if (-not $miss.Count) { Write-Log 'Visual C++ 2015-2022 (64 and 32-bit) and the DirectX End-User Runtime are already installed.' 'Success'; return }
+    foreach ($r in $miss) { try { Install-WingetPackage -Id $r.Id -Name $r.Name } catch { Write-Log $_.Exception.Message 'Error' } }
+}
+function Test-OptionalDevice {
+    param($Device)
+    $cls = [string]$Device.PNPClass
+    $txt = ('{0} {1} {2}' -f [string]$Device.Name,(@($Device.CompatibleID) -join ' '),[string]$Device.PNPDeviceID)
+    if ($cls -in 'Bluetooth','Infrared','Modem','Biometric','SmartCardReader','Camera','Image','WPD','Sensor','Printer','Ports','SDHost','MTD') { return $true }
+    if ($txt -match '(?i)bluetooth|wireless|wi-?fi|wlan|802\.11|wwan|mobile broadband|\bnfc\b|fingerprint|card reader|sd host|infrared|CC_0280|CC_0D') { return $true }
+    if ($cls -eq 'Net' -or $txt -match 'CC_0200') { if (@(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }).Count) { return $true } }
+    if ($cls -eq 'MEDIA' -and @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -eq 0 }).Count) { return $true }
+    return $false
+}
+function Start-RionAutoruns {
+    $exe = @(@('Autoruns64.exe','Autoruns.exe') | ForEach-Object { Join-Path $PSScriptRoot $_ } | Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+    if (-not $exe) { Write-Log 'Autoruns.exe is not next to Rion Tool. Opening the official Sysinternals download page.' 'Info'; Start-Process 'https://learn.microsoft.com/sysinternals/downloads/autoruns'; return }
+    $sig = Get-AuthenticodeSignature -FilePath $exe
+    if ($sig.Status -ne 'Valid' -or [string]$sig.SignerCertificate.Subject -notmatch 'Microsoft') { throw 'Autoruns.exe next to Rion Tool is not signed by Microsoft, so it was not started. Download it again from Sysinternals.' }
+    Start-Process -FilePath $exe
+}
+function Invoke-AppReinstall {
+    param($Checks)
+    $apps = @($Checks | ForEach-Object { $_.Tag })
+    if (-not $apps.Count) { return }
+    if ([System.Windows.MessageBox]::Show(("Reinstall these Microsoft apps?`r`n`r`n" + (($apps | ForEach-Object { '- ' + $_.Name }) -join "`r`n") + "`r`n`r`nEach one is restored from files on this PC when possible, otherwise downloaded from the Microsoft Store catalog with WinGet. No Store window opens."),'Reinstall apps','OKCancel','Question') -ne 'OK') { return }
+    foreach ($app in $apps) { try { Repair-StorePackage -App $app; Write-Log ('Reinstalled {0}.' -f $app.Name) 'Success' } catch { Write-Log ('Could not reinstall {0}: {1}' -f $app.Name,$_.Exception.Message) 'Error' } }
+    try { Build-DebloatList -AutoCheck $false -ApplyPreset $false } catch { }
+}
 function Reset-NetworkTuning {
     $keywords = '*FlowControl','*InterruptModeration','ITR','*LsoV2IPv4','*LsoV2IPv6','*IPChecksumOffloadIPv4','*TCPChecksumOffloadIPv4','*TCPChecksumOffloadIPv6','*UDPChecksumOffloadIPv4','*UDPChecksumOffloadIPv6','*PacketCoalescing','*ReceiveBuffers','*TransmitBuffers','*UsoIPv4','*UsoIPv6','*RscIPv4','*RscIPv6','*RSSProfile','*RssBaseProcNumber','*NumRssQueues'
     Invoke-Action @{ kind='netAdvancedPropertyReset'; keywords=$keywords }
@@ -5085,6 +5253,83 @@ $script:HealthChecks = @(
             if ($off.Count) { New-HealthFinding 'Risky settings' 'info' 0 'Riot Vanguard is disabled' ('{0} is set to Disabled, so Valorant and League of Legends will not start (VAN errors) until it is turned back on. Ignore this if you disabled it on purpose while not playing. Fix restores the Riot defaults; restart afterwards.' -f ($off -join ' and ')) 'Turn Vanguard back on' { Set-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\vgc' -Name 'Start' -Value 3 -Type DWord; Set-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\vgk' -Name 'Start' -Value 1 -Type DWord; Write-Log 'Riot Vanguard restored (vgc Manual, vgk System). Restart to load it.' 'Success' } }
         }
     } }
+    @{ Category='Risky settings'; Run={
+        $why = @(Get-StartSearchProblems)
+        if ($why.Count) { New-HealthFinding 'Risky settings' 'warn' 6 'Start search can ignore what you type' (('When you press Windows and start typing, nothing may appear until you click the search box, because {0}.' -f ($why -join ', and ')) + ' The fix keeps the text input host starting at sign-in and lets Start and Search run.') 'Fix Start search' { Repair-StartSearch } }
+    } }
+    @{ Category='Risky settings'; Run={
+        $core = @(
+            @('msiserver',3,'Windows Installer','Installers that use .msi packages (game launchers, drivers, Visual C++ and other runtimes) fail to install or uninstall.'),
+            @('TrustedInstaller',3,'Windows Modules Installer','Optional features, .NET Framework 3.5, language packs and DISM/SFC repairs fail.'),
+            @('AppXSvc',3,'AppX Deployment Service','Store apps (Xbox app, Game Bar, Calculator, Photos) cannot install, update or sometimes open.'),
+            @('ClipSVC',3,'Client License Service','Store apps and Game Pass games fail their license check and will not start.'),
+            @('AppReadiness',3,'App Readiness','Store app installs and new account sign-ins hang on "Preparing".'),
+            @('StateRepository',3,'State Repository Service','The Start menu, Settings and Store apps stop working properly.'),
+            @('InstallService',3,'Microsoft Store Install Service','Store and Xbox app installs and updates do not start.'),
+            @('BITS',3,'Background Intelligent Transfer Service','The Store, Xbox app and many launchers cannot download in the background.'),
+            @('Winmgmt',2,'Windows Management Instrumentation','Game launchers, anti-cheat and hardware tools that read system information fail.'),
+            @('Audiosrv',2,'Windows Audio','There is no sound in games or apps.'),
+            @('AudioEndpointBuilder',2,'Windows Audio Endpoint Builder','Audio devices disappear and games have no sound.'),
+            @('Dhcp',2,'DHCP Client','The PC cannot get an address from the router, so there is no internet.'),
+            @('Dnscache',2,'DNS Client','Websites, launchers and game servers cannot be reached by name.'),
+            @('nsi',2,'Network Store Interface','Network connections and the network icon stop working.'),
+            @('NlaSvc',2,'Network Location Awareness','Windows thinks there is no internet, so the Store and some games refuse to connect.'),
+            @('W32Time',3,'Windows Time','The clock drifts; launcher and game logins can fail with certificate or time errors.'),
+            @('FontCache',2,'Windows Font Cache','Apps start slowly and text can fail to draw.'),
+            @('camsvc',3,'Capability Access Manager','Apps cannot use the microphone or camera, so voice chat in games stops working.'),
+            @('DispBrokerDesktopSvc',2,'Display Policy Service','Changing resolution, refresh rate or HDR in Settings stops working.'),
+            @('hidserv',3,'Human Interface Device Service','Media keys and some keyboard and controller buttons stop working.'),
+            @('GameInputSvc',3,'GameInput Service','Controllers and input in newer games stop working.'),
+            @('EasyAntiCheat',3,'Easy Anti-Cheat','Games protected by Easy Anti-Cheat refuse to start.'),
+            @('EasyAntiCheat_EOS',3,'Easy Anti-Cheat (EOS)','Games protected by Easy Anti-Cheat refuse to start.'),
+            @('BEService',3,'BattlEye Service','Games protected by BattlEye refuse to start.')
+        )
+        foreach ($c in $core) {
+            if (-not (Test-ServiceExists $c[0]) -or (Get-ServiceStartValue $c[0]) -ne 4) { continue }
+            $fix = [scriptblock]::Create(("Set-ServiceStartNow -Name '{0}' -Start {1}; {2}Write-Log '{3} turned back on.' 'Success'" -f $c[0],$c[1],$(if ($c[1] -eq 2) { "Start-Service -Name '" + $c[0] + "' -ErrorAction SilentlyContinue; " } else { '' }),$c[2]))
+            New-HealthFinding 'Risky settings' 'warn' 4 ('{0} is disabled' -f $c[2]) ($c[3] + ' Windows needs this service; turn it back on.') 'Turn it back on' $fix
+        }
+    } }
+    @{ Category='Maintenance'; Run={
+        foreach ($r in @(Get-MissingRuntimes)) {
+            $fix = [scriptblock]::Create(("Install-WingetPackage -Id '{0}' -Name '{1}'" -f $r.Id,$r.Name))
+            if ($r.Id -eq 'Microsoft.DirectX') { New-HealthFinding 'Maintenance' 'info' 0 ('Not installed: {0}' -f $r.Name) 'Older DirectX 9-11 games need these files and show "d3dx9_43.dll is missing" without them. Newer games do not.' 'Install it' $fix }
+            else { New-HealthFinding 'Maintenance' 'warn' 4 ('Not installed: {0}' -f $r.Name) 'Most games, launchers and anti-cheats need it and fail with "VCRUNTIME140.dll was not found" without it.' 'Install it' $fix }
+        }
+        $fx = Get-OptionalFeatureStates
+        if ($fx.ContainsKey('NetFx3') -and $fx['NetFx3'] -eq 2) { New-HealthFinding 'Maintenance' 'info' 0 '.NET Framework 3.5 is not turned on' 'Some older games and tools need it and ask to download it on first start. Turning it on needs Windows Update or an install image.' 'Turn it on' { Enable-WindowsOptionalFeature -Online -FeatureName NetFx3 -All -NoRestart -ErrorAction Stop | Out-Null; Write-Log '.NET Framework 3.5 is turned on.' 'Success' } }
+    } }
+    @{ Category='Drivers'; Run={
+        $bios = $null; try { $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop } catch { }
+        if (-not $bios -or -not $bios.ReleaseDate) { return }
+        $age = ((Get-Date) - $bios.ReleaseDate).TotalDays / 365.25
+        if ($age -lt 2) { return }
+        $board = $null; try { $board = Get-CimInstance Win32_BaseBoard -ErrorAction Stop } catch { }
+        $model = (('{0} {1}' -f [string]$board.Manufacturer,[string]$board.Product).Trim())
+        $q = [uri]::EscapeDataString(('{0} BIOS download' -f $model))
+        $fix = [scriptblock]::Create(("Start-Process 'https://www.bing.com/search?q={0}'" -f $q))
+        $txt = ('BIOS {0} from {1:yyyy-MM-dd} on {2}. Board makers keep fixing memory compatibility, stability, boost behaviour and security in BIOS updates. Update from the board or PC maker''s support page, never from a third-party site.' -f ([string]$bios.SMBIOSBIOSVersion).Trim(),$bios.ReleaseDate,$(if ($model) { $model } else { 'this board' }))
+        if ($age -ge 3) { New-HealthFinding 'Drivers' 'warn' 3 ('BIOS is {0:N0} years old' -f [math]::Floor($age)) $txt 'Find the BIOS update' $fix }
+        else { New-HealthFinding 'Drivers' 'info' 0 ('BIOS is {0:N0} years old' -f [math]::Floor($age)) $txt 'Find the BIOS update' $fix }
+    } }
+    @{ Category='Placebo tweaks'; Run={
+        foreach ($v in $script:ExtraPlaceboValues) {
+            $item = Get-Item -LiteralPath $v.Path -ErrorAction SilentlyContinue
+            if (-not $item) { continue }
+            $names = @($item.GetValueNames() | Where-Object { $_ -match $v.Pattern })
+            foreach ($n in $names) {
+                $val = $item.GetValue($n)
+                if ($v.Bad -and -not (& $v.Bad $val)) { continue }
+                $fix = if ($null -ne $v.Default) { [scriptblock]::Create(("Set-RegValue -Path '{0}' -Name '{1}' -Value {2} -Type DWord; Write-Log '{1} is back to the Windows default.' 'Success'" -f $v.Path,$n,$v.Default)) } else { [scriptblock]::Create(("Remove-RegValue -Path '{0}' -Name '{1}'; Write-Log '{1} removed; Windows uses its default again.' 'Success'" -f $v.Path,$n)) }
+                New-HealthFinding 'Placebo tweaks' $v.Sev $(if ($v.Sev -eq 'warn') { 3 } else { 0 }) ('{0} ({1}={2})' -f $v.Title,$n,(@($val) -join ',')) $v.Why 'Put back the default' $fix
+            }
+        }
+        $pf = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -ErrorAction SilentlyContinue
+        if ($pf) {
+            $files = @($pf.GetValue('PagingFiles')) | Where-Object { $_ }
+            if (-not $files.Count) { New-HealthFinding 'Placebo tweaks' 'bad' 8 'The page file is turned off' 'Games and Windows expect a page file. Without one, a game that briefly needs more memory crashes or shows out-of-memory errors instead of slowing down, and crash dumps are not saved.' 'Let Windows manage it' { $cs = Get-CimInstance Win32_ComputerSystem; Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile=$true } -ErrorAction Stop; Write-Log 'The page file is back to system-managed. Restart to apply.' 'Success' } }
+        }
+    } }
     @{ Category='Hardware'; Run={
         $gb = [int]$script:Env.RamNominalGB
         if ($gb -gt 0 -and $gb -lt 16) { New-HealthFinding 'Hardware' 'warn' 4 ('{0} GB of memory' -f $gb) 'Current games and a browser or Discord in the background often need more than 8-12 GB, which pushes data to the page file and causes stutter. 16 GB (two sticks) is the practical minimum for gaming.' }
@@ -5113,7 +5358,7 @@ $script:HealthChecks = @(
             @('VEN_8086&DEV_.*&CC_0780','Intel Management Engine interface','firmware security and platform features','Intel Management Engine driver'),
             @('INT34','Intel Serial IO controller','touchpads, sensors and GPIO on Intel boards','Intel Serial IO driver')
         )
-        $nod = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -eq 28 -and [string]$_.PNPDeviceID -notmatch '^(SWD|ROOT)\\' })
+        $nod = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -eq 28 -and [string]$_.PNPDeviceID -notmatch '^(SWD|ROOT)\\' } | Where-Object { -not (Test-OptionalDevice $_) })
         foreach ($d in $nod) {
             $id = [string]$d.PNPDeviceID
             $hit = @($known | Where-Object { $id -match $_[0] }) | Select-Object -First 1
@@ -5403,6 +5648,9 @@ $fixesPanel = New-Object Windows.Controls.DockPanel; $fixesPanel.Margin='10'
 $fixDefs = @(
     @{ Group='Repair Windows'; Label='Run DISM and SFC (repair system files)'; Info='DISM /Online /Cleanup-Image /RestoreHealth repairs the component store first, then sfc /scannow repairs system files from it. Fixes "features not applying" and corruption.'; Act={ Start-Process cmd '/k DISM /Online /Cleanup-Image /RestoreHealth & sfc /scannow' } }
     @{ Group='Deep cleanup'; Label='Deep clean: DISM, SFC, temp files and Disk Cleanup'; Info='Opens a window that runs DISM RestoreHealth, SFC, component store cleanup, clears user and Windows temp folders, runs Disk Cleanup (keeping the DirectX shader cache, Downloads, Recycle Bin, previous Windows installations, the Reset this PC image, File History versions, older drivers and crash dumps), then flushes DNS. Prefetch is kept because it speeds up launches. Takes 15-30 minutes.'; Act={ Invoke-FullCleanup } }
+    @{ Group='Repair Windows'; Label='Turn Windows Update back on'; Info='Puts the Windows Update, Update Orchestrator, Medic, BITS and Delivery Optimization services back to their defaults, removes policies other tools use to block updates (no auto update, blocked update servers, hidden update page) and turns the update tasks back on. Your feature-update deferral and driver choices stay as they are.'; Act={ Repair-WindowsUpdate } }
+    @{ Group='Repair Windows'; Label='Turn Microsoft Defender back on'; Info='Undoes the Rion Tool Defender option and removes the policies other tools use to switch Defender off (DisableAntiSpyware, real-time protection and cloud policies), turns its scheduled tasks back on and opens Windows Security. Restart afterwards.'; Act={ Repair-Defender } }
+    @{ Group='Gaming and anti-cheat'; Label='Install missing game runtimes (Visual C++, DirectX)'; Info='Installs the Visual C++ 2015-2022 runtimes (64 and 32-bit) and the DirectX End-User Runtime through WinGet when they are missing. Most games and launchers need them; a missing one shows up as "VCRUNTIME140.dll was not found" or "d3dx9_43.dll is missing".'; Act={ Install-GameRuntimes } }
     @{ Group='Repair Windows'; Label='Fix Start menu typing (search ignores keys until clicked)'; Info='Lets the Start menu, Search, shell and text-input apps run in the background even when background apps are blocked, clears the per-user background-app off switches, re-enables the text input service and ctfmon, then restarts Search and Start.'; Act={ Repair-StartSearch } }
     @{ Group='Reset tuning to Windows defaults'; Label='Reset network adapter tuning to driver defaults'; Info='Puts every physical adapter back to its driver defaults for checksum/LSO/UDP offloads, flow control, interrupt moderation, packet coalescing, buffers, RSC and RSS, removes Nagle (TcpAckFrequency/TCPNoDelay) values, sets TCP autotuning to normal and restarts connected adapters (a few seconds offline). Use this if network tweaks made the connection unstable.'; Act={ Reset-NetworkTuning } }
     @{ Group='Deep cleanup'; Label='Clear Windows Update and Store caches'; Info='Stops the update services, clears the SoftwareDistribution download cache and the Delivery Optimization cache, restarts the services, and resets the Microsoft Store cache (wsreset). Fixes stuck updates and Store errors; the next update check and Store open rebuild the caches.'; Act={ Clear-UpdateAndStoreCaches } }
@@ -5578,6 +5826,48 @@ $btnGhostRemove.Add_Click({
     $script:CleanupUi.GhostChecks = @($script:CleanupUi.GhostChecks | Where-Object { -not $_.IsChecked })
 })
 
+function Export-RionSelection {
+    param([string]$Path)
+    if (-not $Path) {
+        $dlg = New-Object System.Windows.Forms.SaveFileDialog
+        $dlg.Filter = 'Rion Tool selection (*.json)|*.json'; $dlg.FileName = ('RionTool-selection-{0}.json' -f (Get-Date -Format 'yyyyMMdd'))
+        if ($dlg.ShowDialog() -ne 'OK') { return }
+        $Path = $dlg.FileName
+    }
+    $ticked = @(); $choices = [ordered]@{}
+    foreach ($id in @($script:Rows.Keys | Sort-Object)) {
+        $e = $script:Rows[$id]
+        if ($e.Check -and $e.Check.IsChecked) { $ticked += $id }
+        elseif ($e.Combo -and $e.Combo.SelectedIndex -gt 0) { $choices[$id] = [string]$e.Combo.SelectedItem }
+    }
+    [ordered]@{ Tool='Rion Tool'; Build=$script:Build; Saved=(Get-Date).ToString('s'); Ticked=$ticked; Choices=$choices } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+    Write-Log ('Saved {0} ticked setting(s) and {1} dropdown choice(s) to {2}' -f $ticked.Count,$choices.Count,$Path) 'Success'
+}
+function Import-RionSelection {
+    param([string]$Path,[switch]$Quiet)
+    if (-not $script:Ready) { [System.Windows.MessageBox]::Show('Rion Tool is still reading your current settings. Try again in a moment.','Load selection','OK','Information') | Out-Null; return }
+    if (-not $Path) {
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Filter = 'Rion Tool selection (*.json)|*.json'
+        if ($dlg.ShowDialog() -ne 'OK') { return }
+        $Path = $dlg.FileName
+    }
+    $data = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ([string]$data.Tool -ne 'Rion Tool') { throw 'This file is not a Rion Tool selection.' }
+    $ticked = 0; $picked = 0; $skipped = @()
+    foreach ($id in @($data.Ticked)) {
+        $e = $script:Rows[[string]$id]
+        if ($e -and $e.Check -and $e.Check.IsEnabled) { $e.Check.IsChecked = $true; $ticked++ } else { $skipped += [string]$id }
+    }
+    if ($data.Choices) {
+        foreach ($p in $data.Choices.PSObject.Properties) {
+            $e = $script:Rows[$p.Name]
+            if ($e -and $e.Combo -and $e.Combo.IsEnabled -and $e.Combo.Items.Contains([string]$p.Value)) { $e.Combo.SelectedItem = [string]$p.Value; $e.Touched = $true; $picked++ } else { $skipped += $p.Name }
+        }
+    }
+    Write-Log ('Loaded {0}: ticked {1} setting(s) and set {2} dropdown(s). Not available on this PC: {3}' -f (Split-Path $Path -Leaf),$ticked,$picked,$(if ($skipped.Count) { $skipped -join ', ' } else { 'none' })) 'Success'
+    if (-not $Quiet) { [System.Windows.MessageBox]::Show(('Ticked {0} setting(s) and set {1} dropdown(s){2}.' -f $ticked,$picked,$(if ($skipped.Count) { (', {0} not available on this PC' -f $skipped.Count) } else { '' })) + "`r`n`r`nReview the pages, then click Apply.",'Load selection','OK','Information') | Out-Null }
+}
 function Invoke-OneClickOptimize {
     param([string]$Mode = 'Recommended')
     if (-not $script:Ready) { [System.Windows.MessageBox]::Show('Rion Tool is still reading your current settings. Try again in a moment.','One-click optimize','OK','Information') | Out-Null; return }
@@ -5621,6 +5911,9 @@ $findBox = New-SectionBox -Title 'Findings and recommendations' -Children @($scr
 $script:BuildingTab = 'Home'
 $autoRows = @(
     (New-ActionRow -Label 'Create a desktop shortcut (opens as administrator)' -Info 'Adds "Rion Tool" to your desktop. It starts this copy of the script with PowerShell and asks for administrator rights.' -Act { New-RionShortcut }),
+    (New-ActionRow -Label 'Open Autoruns (everything that starts with Windows)' -Info 'Starts Microsoft Sysinternals Autoruns from the Rion Tool folder after checking that it is signed by Microsoft. It lists every startup entry, service, driver, scheduled task and shell extension so you can find what runs at boot. If it is not in the folder, the official download page opens.' -Act { Start-RionAutoruns }),
+    (New-ActionRow -Label 'Save my selection to a file' -Info 'Saves every ticked setting and every dropdown choice on all pages to a .json file. Load it on another PC to set it up the same way.' -Act { Export-RionSelection }),
+    (New-ActionRow -Label 'Load a selection file' -Info 'Ticks the settings and picks the dropdown values saved in a selection file. Settings that are not in the file are left as they are, and nothing changes until you click Apply.' -Act { Import-RionSelection }),
     (New-HintText 'Command line: RionTool.ps1 -Cleanup runs the recommended cleanup without opening the window (for your own scripts or shortcuts).')
 )
 $autoBox = New-SectionBox -Title 'Shortcuts and automation' -Children $autoRows
@@ -6651,7 +6944,7 @@ $ViewRisky.Add_Click({ Update-ViewFilter })
  
 $script:NoPreset = @('feat.net.wifi','feat.net.eth','gpu.msi')
 foreach ($p in @('Recommended','Gamer max','Minimal','Max (incl. Risky)','None')) { [void]$PresetCombo.Items.Add($p) }
-$script:GamerMaxExclude = @('startup.all','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.bg.appr','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
+$script:GamerMaxExclude = @('startup.all','gpu.vrr.windowed','feat.lighting.off','feat.taskbar.simple','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
 function Test-GamerMax {
     param($Tweak)
     if ($Tweak.Risk -notin 'Safe','Moderate') { return $false }
@@ -7104,6 +7397,8 @@ $ApplyBtn.Add_Click({
     $pending = @(Get-PendingTweaks)
     Write-Log ("Apply: {0} change(s) pending; {1} rows ticked" -f $pending.Count,@($script:Rows.Values | Where-Object { $_.Check -and $_.Check.IsChecked }).Count) 'Info'
     $appPending=@($script:DebloatChecks + $script:ProgramChecks | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
+    $reinstallPending=@($script:ReinstallChecks | Where-Object { $_.IsChecked })
+    if ($reinstallPending.Count) { try { Invoke-AppReinstall $reinstallPending } catch { Write-Log ('Reinstall failed: {0}' -f $_.Exception.Message) 'Error' }; if ($pending.Count -eq 0 -and $appPending.Count -eq 0) { return } }
     if ($pending.Count -eq 0 -and $appPending.Count -eq 0) {
         if (Test-GamesPending) { try { Save-AllGames } catch { Write-Log ('Game settings: save failed: {0}' -f $_.Exception.Message) 'Error' }; return }
         [System.Windows.MessageBox]::Show("Nothing to change. Ticked settings are already applied.`r`n`r`nTick a setting to apply it, or untick an applied one to restore its original value.",'Rion Tool','OK','Information') | Out-Null
@@ -7250,6 +7545,21 @@ function Build-DebloatList {
     if ($knownApps.Count -eq 0) {
         $none = New-Object Windows.Controls.TextBlock; $none.Text='No removable Store apps with Start menu entries were found for this user.'; Set-ThemeBrush $none 'Foreground' 'Muted'
         [void]$dStoreList.Children.Add($none)
+    }
+    $installedNames = @($installed | ForEach-Object { [string]$_.Name })
+    $missingApps = @($script:ReinstallCatalog | Where-Object { -not @($_.Packages | Where-Object { $installedNames -contains $_ }).Count } | Sort-Object { $_.Name })
+    $script:ReinstallChecks = @()
+    if ($missingApps.Count) {
+        $missHeader=New-Object Windows.Controls.TextBlock; $missHeader.Text='Not installed: Microsoft apps missing from this PC (tick to reinstall, then click Apply)'; Set-ThemeBrush $missHeader 'Foreground' 'SubText'; $missHeader.Margin='0,10,0,4'; $missHeader.FontWeight='SemiBold'; $missHeader.TextWrapping='Wrap'
+        [void]$dStoreList.Children.Add($missHeader)
+        $missGrid=New-Object Windows.Controls.Primitives.UniformGrid; $missGrid.Columns=2
+        [void]$dStoreList.Children.Add($missGrid)
+        foreach ($app in $missingApps) {
+            $rcb = New-Object Windows.Controls.CheckBox; $rcb.Content=$app.Name; $rcb.Margin='0,2,0,2'; $rcb.Tag=$app
+            $rcb.ToolTip=('Reinstalls {0} ({1}) from files on this PC or from the Microsoft Store catalog with WinGet.' -f $app.Name,($app.Packages -join ', '))
+            [void]$missGrid.Children.Add($rcb); $script:ReinstallChecks += $rcb
+            $script:SearchItems += @{ Row=$rcb; Text=('reinstall {0}' -f $app.Name); Tab='Debloat' }
+        }
     }
     $programHeader=New-Object Windows.Controls.TextBlock; $programHeader.Text='Program apps (Win32 uninstall entries; check only software you intentionally want removed)'; Set-ThemeBrush $programHeader 'Foreground' 'SubText'; $programHeader.Margin='0,14,0,8'; $programHeader.FontWeight='SemiBold'
     [void]$dProgramList.Children.Add($programHeader)
