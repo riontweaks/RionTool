@@ -11,7 +11,9 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 **PC health**
 - Scores the PC out of 100 and lists findings in five groups: tweaks, drivers, security, maintenance and hardware.
 - Flags single-channel memory, missing chipset drivers (named one by one), devices with errors, failing or worn drives, old BIOS on Ryzen fTPM systems, junk files and harmful leftovers from old tweak guides.
-- Leaves out things you turned off on purpose, like a disabled Bluetooth radio or Windows Update.
+- Checks the services games and installers need (Windows Installer, Store install, BITS, audio, network, time, Easy Anti-Cheat, BattlEye) and the Visual C++ and DirectX runtimes, with a one-click fix for each.
+- Lists harmful and placebo registry values one by one (forced TCP window, GPU timeout changes, ASLR or SEHOP off, page file off, old IRQ and kernel values), each with its own revert.
+- Leaves out things you turned off on purpose, like a disabled Bluetooth radio, a Wi-Fi card without a driver on a wired PC, or Windows Update.
 
 **One-click optimize**
 - The Rion button in the bottom left ticks every Safe and Moderate gaming tweak, resets placebo tweaks and cleans junk files. You see the full list before anything changes.
@@ -37,10 +39,15 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 
 **Cleanup and fixes**
 - Temp files, update caches, error reports, driver leftovers, shader caches and launcher web caches.
-- Repairs for Windows files, the Microsoft Store, Wi-Fi, Ethernet, Bluetooth, Xbox and anti-cheat requirements.
+- Repairs for Windows files, the Microsoft Store, Start menu search, Wi-Fi, Ethernet, Bluetooth, Xbox and anti-cheat requirements.
+- One-click buttons to turn Windows Update and Microsoft Defender back on, including blocks left by other tools.
 
 **Debloat**
 - Removes preinstalled Store apps. The Store, Photos, Settings and other core apps are always kept.
+- A "Not installed" list shows Microsoft apps missing from the PC. Tick one to reinstall it from local files or the Microsoft Store catalog.
+
+**Profiles**
+- Save every ticked setting to a .json file and load it on another PC to set it up the same way.
 
 **Search**
 - The search box at the top searches every tab, cleanup option and fix.
