@@ -7394,80 +7394,200 @@ function Get-TweakChildren {
     return $children
 }
  
-function Invoke-ApplySelected {
-    param($Nodes,[bool]$RestoreFirst)
-    $script:Window.Dispatcher.Invoke([action]{ foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled=$false } })
-    Start-Job-Like {
-        Write-Log 'Applying selected settings...' 'Action'
-        if ($RestoreFirst) { New-RestorePoint | Out-Null }
- 
-        $touchedService = $false
-        $nodeIndex = 0; $nodeTotal = @($Nodes).Count
-        foreach ($n in $Nodes) {
-            $nodeIndex++
-            Update-UiNow ('Applying {0} of {1}: {2}' -f $nodeIndex,$nodeTotal,$n.Tweak.Label)
-            $hasSelectedChild = [bool]@($n.Children | Where-Object { $_.Check.IsChecked }).Count
-            if ($n.Children.Count -gt 0) {
-                if (-not $hasSelectedChild) { continue }
-            } elseif (-not $n.Parent.IsChecked) { continue }
-            $t = $n.Tweak
-            $operationText=if($n.TargetApplied){("{0} {1}" -f $t.ApplyVerb,$t.Label)}else{(Get-RevertLabel $t.Label)}
-            Write-Log ("{0}..." -f $operationText) 'Action'
-            try {
-                $hvciReenabled = $false
-                if ($n.HvciOverride -eq 'Enable') {
-                    Set-HvciEnabledForAntiCheat
-                    $hvciReenabled = $true
+function Get-ApplyWorkerParts {
+    if ($script:ApplyWorkerParts) { return $script:ApplyWorkerParts }
+    $file = (Get-Command Invoke-Action).ScriptBlock.File
+    $skip = 'Write-Log','Update-UiNow'
+    $known = @{}
+    foreach ($f in @(Get-ChildItem -Path Function:)) { if ($f.ScriptBlock.File -eq $file) { $known[$f.Name] = $f.ScriptBlock } }
+    $funcs = [ordered]@{}
+    $queue = New-Object System.Collections.Queue
+    foreach ($r in 'Invoke-Action','Save-OriginalRecords','Invoke-DropdownChoice','Set-HvciEnabledForAntiCheat','New-RestorePoint','Get-RevertActions','Get-RevertLabel','Test-HvciDisableAction','Get-TweakDetection') { $queue.Enqueue($r) }
+    while ($queue.Count) {
+        $name = [string]$queue.Dequeue()
+        if ($funcs.Contains($name) -or $skip -contains $name -or -not $known.ContainsKey($name)) { continue }
+        $funcs[$name] = $known[$name]
+        foreach ($c in $known[$name].Ast.FindAll({ param($x) $x -is [Management.Automation.Language.CommandAst] },$true)) {
+            $cn = $c.GetCommandName()
+            if ($cn -and $known.ContainsKey($cn) -and -not $funcs.Contains($cn)) { $queue.Enqueue($cn) }
+        }
+    }
+    $uiVars = 'Window','StatusLabel','Rows','LogPath'
+    $vars = @{}
+    $text = New-Object System.Text.StringBuilder
+    foreach ($name in $funcs.Keys) {
+        [void]$text.AppendLine(("function {0} {{ {1} }}" -f $name,$funcs[$name]))
+        foreach ($v in $funcs[$name].Ast.FindAll({ param($x) $x -is [Management.Automation.Language.VariableExpressionAst] },$true)) {
+            if ($v.VariablePath.IsScript) { $n = $v.VariablePath.UserPath -replace '^script:',''; if ($uiVars -notcontains $n) { $vars[$n] = $true } }
+        }
+    }
+    $script:ApplyWorkerParts = @{ Functions=$text.ToString(); Vars=@($vars.Keys | Sort-Object) }
+    return $script:ApplyWorkerParts
+}
+
+$script:ApplyWorkerBody = @'
+function Write-Log {
+    param([Parameter(Mandatory)][string]$Message,[ValidateSet('Info','Action','Success','Warn','Error')][string]$Level = 'Info')
+    $applyQueue.Enqueue(@{ Kind='log'; Message=$Message; Level=$Level })
+}
+foreach ($k in @($applyVars.Keys)) { Set-Variable -Name $k -Value $applyVars[$k] -Scope Script }
+$script:Rows = @{}
+try {
+    Write-Log 'Applying selected settings...' 'Action'
+    if ($applyRestore) { New-RestorePoint | Out-Null }
+    $nodeIndex = 0; $nodeTotal = @($applyJobs).Count
+    foreach ($n in $applyJobs) {
+        $nodeIndex++
+        $applyQueue.Enqueue(@{ Kind='status'; Text=('Applying {0} of {1}: {2}' -f $nodeIndex,$nodeTotal,$n.Tweak.Label) })
+        if ($n.ChildCount -gt 0) {
+            if (-not @($n.Children).Count) { continue }
+        } elseif (-not $n.Selected) { continue }
+        $t = $n.Tweak
+        $operationText = if ($n.TargetApplied) { ("{0} {1}" -f $t.ApplyVerb,$t.Label) } else { (Get-RevertLabel $t.Label) }
+        Write-Log ("{0}..." -f $operationText) 'Action'
+        try {
+            $hvciReenabled = $false
+            if ($n.HvciOverride -eq 'Enable') {
+                Set-HvciEnabledForAntiCheat
+                $hvciReenabled = $true
+            }
+            if ($hvciReenabled -and $t.Id -eq 'sec.vbs') {
+            } elseif ($n.ChildCount -gt 0) {
+                foreach ($a in @($n.Children)) {
+                    if ($n.TargetApplied) { Save-OriginalRecords -Id $t.Id -Actions @($a) }
+                    Invoke-Action $a
                 }
-                if ($hvciReenabled -and $t.Id -eq 'sec.vbs') {
-                } elseif ($n.Children.Count -gt 0) {
-                    foreach ($c in $n.Children) {
-                        if ($c.Check.IsChecked) {
-                            if ($n.TargetApplied) { Save-OriginalRecords -Id $t.Id -Actions @($c.Data.Action) }
-                            Invoke-Action $c.Data.Action
-                            if ($c.Data.Action.kind -eq 'service') { $touchedService = $true }
-                        }
-                    }
-                    if (@($n.Children | Where-Object { $_.Check.IsChecked }).Count) {
-                        $childKinds = 'service','taskFolder','task','taskNamePattern','dxApp','throttleApp','msiMode','optionalFeature'
-                        $loose = @($(if ($n.TargetApplied) { @($t.Apply) } else { @(Get-RevertActions $t) }) | Where-Object { $childKinds -notcontains $_.kind })
-                        if ($n.TargetApplied -and $loose.Count) { Save-OriginalRecords -Id $t.Id -Actions $loose }
-                        foreach ($a in $loose) { Invoke-Action $a }
-                    }
-                } elseif ($t.Type -eq 'dropdown' -and $n.Choice) {
-                    Save-OriginalRecords -Id $t.Id -Actions @(@{kind='dropdownState';id=$t.Id})
-                    Invoke-DropdownChoice -Tweak $t -Choice $n.Choice
-                } else {
-                    $actions=if($n.TargetApplied){@($t.Apply)}else{@(Get-RevertActions $t)}
-                    if ($hvciReenabled) { $actions=@($actions | Where-Object { -not (Test-HvciDisableAction $_) }) }
-                    if ($n.TargetApplied) { Save-OriginalRecords -Id $t.Id -Actions $actions }
-                    foreach ($a in $actions) { Invoke-Action $a; if ($a.kind -eq 'service') { $touchedService = $true } }
+                $childKinds = 'service','taskFolder','task','taskNamePattern','dxApp','throttleApp','msiMode','optionalFeature'
+                $loose = @($(if ($n.TargetApplied) { @($t.Apply) } else { @(Get-RevertActions $t) }) | Where-Object { $childKinds -notcontains $_.kind })
+                if ($n.TargetApplied -and $loose.Count) { Save-OriginalRecords -Id $t.Id -Actions $loose }
+                foreach ($a in $loose) { Invoke-Action $a }
+            } elseif ($t.Type -eq 'dropdown' -and $n.Choice) {
+                Save-OriginalRecords -Id $t.Id -Actions @(@{kind='dropdownState';id=$t.Id})
+                Invoke-DropdownChoice -Tweak $t -Choice $n.Choice
+            } else {
+                $actions = if ($n.TargetApplied) { @($t.Apply) } else { @(Get-RevertActions $t) }
+                if ($hvciReenabled) { $actions = @($actions | Where-Object { -not (Test-HvciDisableAction $_) }) }
+                if ($n.TargetApplied) { Save-OriginalRecords -Id $t.Id -Actions $actions }
+                foreach ($a in $actions) { Invoke-Action $a }
+            }
+            if ($hvciReenabled -or ($t.Id -eq 'sec.vbs' -and [string]$n.Choice -eq 'On')) { $applyQueue.Enqueue(@{ Kind='hvci' }) }
+            $doneVerb = if ($hvciReenabled) { 'Enabled HVCI and skipped the selected HVCI disable request' } elseif ($n.TargetApplied) { $t.DoneVerb } else { 'Restored original setting' }
+            Write-Log $doneVerb 'Success'
+        } catch {
+            Write-Log ("Failed: {0} - {1}" -f $t.Label, $_.Exception.Message) 'Error'
+        }
+    }
+    Write-Log 'Done. A restart is recommended for service changes.' 'Success'
+    $applyQueue.Enqueue(@{ Kind='status'; Text='Reading the changed settings...' })
+    try { $applySync.Fresh = Get-TweakDetection -Tweaks $applyRescan -Env $script:Env }
+    catch { Write-Log ("Could not refresh setting status: {0}" -f $_.Exception.Message) 'Warn' }
+} catch {
+    Write-Log ("Apply stopped: {0}" -f $_.Exception.Message) 'Error'
+} finally {
+    $back = @{}
+    foreach ($k in @($applyVars.Keys)) { $back[$k] = Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue }
+    $applySync.Vars = $back
+    $applySync.Done = $true
+}
+'@
+
+function Receive-ApplyMessages {
+    $run = $script:ApplyRun
+    if (-not $run) { return }
+    $m = $null
+    while ($run.Queue.TryDequeue([ref]$m)) {
+        switch ([string]$m.Kind) {
+            'log' { Write-Log $m.Message $m.Level }
+            'status' { if ($script:StatusLabel) { $script:StatusLabel.Text = [string]$m.Text } }
+            'hvci' {
+                if ($script:Rows.ContainsKey('sec.vbs')) {
+                    $entry = $script:Rows['sec.vbs']
+                    if ($entry.Combo) { $entry.Combo.SelectedItem = 'On' }
+                    if ($entry.Status) { $entry.Status.Text = 'Configured On; restart required' }
                 }
-                $doneVerb=if($hvciReenabled){'Enabled HVCI and skipped the selected HVCI disable request'}elseif($n.TargetApplied){$t.DoneVerb}else{'Restored original setting'}
-                Write-Log $doneVerb 'Success'
-            } catch {
-                Write-Log ("Failed: {0} - {1}" -f $t.Label, $_.Exception.Message) 'Error'
             }
         }
- 
-        Write-Log 'Done. A restart is recommended for service changes.' 'Success'
-
     }
-    try {
-        $changedIds = @($Nodes | ForEach-Object { $_.Tweak.Id } | Select-Object -Unique)
-        $fresh = Get-TweakDetection -Tweaks @($script:Tweaks | Where-Object { $changedIds -contains $_.Id }) -Env $script:Env
-        foreach ($k in $fresh.Keys) { $script:Detection[$k] = $fresh[$k] }
-        Apply-Detection
-        Save-DetectionCache
-        $script:Window.Dispatcher.BeginInvoke([action]{ try { Update-HomeHealth } catch { } },[Windows.Threading.DispatcherPriority]::Background) | Out-Null
-    } catch { Write-Log ("Could not refresh setting status: {0}" -f $_.Exception.Message) 'Warn' }
-    foreach ($e in $script:Rows.Values) { $e.Touched = $false }
-    $script:Window.Dispatcher.Invoke([action]{ foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled=$true } })
 }
- 
-function Start-Job-Like {
-    param([scriptblock]$Script)
-    & $Script
+
+function Complete-ApplyRun {
+    $run = $script:ApplyRun
+    if (-not $run) { return }
+    $run.Timer.Stop()
+    try {
+        Receive-ApplyMessages
+        try { [void]$run.Ps.EndInvoke($run.Async) } catch { Write-Log ("Apply worker error: {0}" -f $_.Exception.Message) 'Error' }
+        foreach ($err in @($run.Ps.Streams.Error)) { Write-Log ("Apply worker error: {0}" -f $err) 'Warn' }
+        if ($run.Sync.Vars) {
+            foreach ($k in @($run.Sync.Vars.Keys)) {
+                $current = Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+                if (-not [object]::ReferenceEquals($current,$run.Sync.Vars[$k])) { Set-Variable -Name $k -Value $run.Sync.Vars[$k] -Scope Script }
+            }
+        }
+        Clear-DetectionCaches
+        try {
+            if ($run.Sync.Fresh) {
+                foreach ($k in $run.Sync.Fresh.Keys) { $script:Detection[$k] = $run.Sync.Fresh[$k] }
+                Apply-Detection
+                Save-DetectionCache
+                $script:Window.Dispatcher.BeginInvoke([action]{ try { Update-HomeHealth } catch { } },[Windows.Threading.DispatcherPriority]::Background) | Out-Null
+            }
+        } catch { Write-Log ("Could not refresh setting status: {0}" -f $_.Exception.Message) 'Warn' }
+    } finally {
+        try { $run.Ps.Dispose(); $run.Runspace.Close(); $run.Runspace.Dispose() } catch { }
+        foreach ($e in $script:Rows.Values) { $e.Touched = $false }
+        foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled = $true }
+        $script:ApplyRun = $null
+        $run.Frame.Continue = $false
+    }
+}
+
+function Invoke-ApplySelected {
+    param($Nodes,[bool]$RestoreFirst)
+    if ($script:ApplyRun) { Write-Log 'An apply is already running.' 'Warn'; return }
+    foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled = $false }
+    $started = $false
+    try {
+        $jobs = @(foreach ($n in @($Nodes)) {
+            @{
+                Tweak=$n.Tweak; Choice=$n.Choice; TargetApplied=[bool]$n.TargetApplied; HvciOverride=[string]$n.HvciOverride
+                Selected=[bool]$n.Parent.IsChecked; ChildCount=@($n.Children).Count
+                Children=@(@($n.Children) | Where-Object { $_.Check.IsChecked } | ForEach-Object { $_.Data.Action })
+            }
+        })
+        $changedIds = @($jobs | ForEach-Object { $_.Tweak.Id } | Select-Object -Unique)
+        $rescan = @($script:Tweaks | Where-Object { $changedIds -contains $_.Id })
+        $parts = Get-ApplyWorkerParts
+        $vars = @{}
+        foreach ($k in $parts.Vars) { $var = Get-Variable -Name $k -Scope Script -ErrorAction SilentlyContinue; if ($var) { $vars[$k] = $var.Value } }
+        $run = @{
+            Queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+            Sync = [hashtable]::Synchronized(@{ Done=$false; Fresh=$null; Vars=$null })
+            Frame = New-Object Windows.Threading.DispatcherFrame
+            Timer = New-Object Windows.Threading.DispatcherTimer
+            Runspace = [runspacefactory]::CreateRunspace()
+        }
+        $run.Runspace.ApartmentState = 'MTA'
+        $run.Runspace.Open()
+        foreach ($pair in @(@('applyQueue',$run.Queue),@('applySync',$run.Sync),@('applyVars',$vars),@('applyJobs',$jobs),@('applyRestore',$RestoreFirst),@('applyRescan',$rescan))) { $run.Runspace.SessionStateProxy.SetVariable($pair[0],$pair[1]) }
+        $run.Ps = [powershell]::Create()
+        $run.Ps.Runspace = $run.Runspace
+        [void]$run.Ps.AddScript($parts.Functions + "`n" + $script:ApplyWorkerBody)
+        $run.Timer.Interval = [TimeSpan]::FromMilliseconds(100)
+        $run.Timer.Add_Tick({ Receive-ApplyMessages; if ($script:ApplyRun -and $script:ApplyRun.Sync.Done) { Complete-ApplyRun } })
+        $script:ApplyRun = $run
+        $run.Async = $run.Ps.BeginInvoke()
+        $run.Timer.Start()
+        $started = $true
+        [Windows.Threading.Dispatcher]::PushFrame($run.Frame)
+    } catch {
+        Write-Log ("Apply could not start: {0}" -f $_.Exception.Message) 'Error'
+    } finally {
+        if (-not $started) {
+            if ($script:ApplyRun) { try { $script:ApplyRun.Runspace.Close() } catch { }; $script:ApplyRun = $null }
+            foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled = $true }
+        }
+    }
 }
  
 function Invoke-DropdownChoice {
