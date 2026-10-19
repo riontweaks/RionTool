@@ -1,10 +1,10 @@
 # Manual driver app settings (AMD / NVIDIA / Intel)
 
-These settings live inside the graphics driver apps. Rion Tool cannot change them safely through the registry, so set them by hand.
+These settings live inside the graphics driver apps, so set them by hand. On NVIDIA, Rion Tool can apply the main 3D settings for you (Low Latency Mode, Power management mode, texture filtering) through NVIDIA Profile Inspector on the NVIDIA tab; the rest of this page is manual.
 
 **Order of importance:**
 - In-game latency tech (Reflex / Anti-Lag 2 / XeLL) is the biggest win.
-- Then turn off anything that adds frames, filters or sync.
+- Then turn off anything that adds frames, filters or V-Sync. Keep FreeSync / G-SYNC / Adaptive Sync on if your monitor supports it.
 - Everything else is small.
 
 ---
@@ -12,10 +12,10 @@ These settings live inside the graphics driver apps. Rion Tool cannot change the
 ## Before any vendor: Windows and BIOS (do these first)
 
 - **Monitor refresh rate:** Settings > System > Display > Advanced display > pick the HIGHEST refresh rate. Many PCs sit at 60 Hz by mistake.
-- **Cable:** monitor plugged into the GRAPHICS CARD, not the motherboard.
+- **Cable (desktops with a graphics card):** plug the monitor into the GRAPHICS CARD, not the motherboard. Laptops: use the port the maker says is wired to the dedicated GPU.
 - **BIOS:**
   - Turn on XMP (Intel) or EXPO (AMD) so RAM runs at its rated speed.
-  - Turn on Resizable BAR / Above 4G Decoding (AMD calls it Smart Access Memory). Intel Arc NEEDS it.
+  - Turn on Resizable BAR / Above 4G Decoding when the board supports it (AMD calls it Smart Access Memory). Intel Arc works without it but loses a lot of performance, so turn it on for Arc.
 - **RAM:** two sticks in the slots the board manual says (dual channel).
 - **Drivers:** install the chipset driver from AMD or Intel, and the newest graphics driver.
 
@@ -28,7 +28,7 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 | Setting | Set to | Why |
 |---|---|---|
 | Graphics Profile | Custom (or Esports as a start) | Esports already turns off most extras. |
-| AMD Radeon Anti-Lag | ON (it becomes Anti-Lag 2 in supported games like Valorant, CS2) | Lowers input delay. Biggest AMD win. |
+| AMD Radeon Anti-Lag | ON | Driver-level input delay reduction for any game. Games that build in Anti-Lag 2 (Valorant, CS2, Fortnite) also have their own in-game Anti-Lag 2 switch: turn that on too. |
 | Radeon Chill | OFF | Caps your FPS on purpose to save power. |
 | Radeon Boost | OFF | Lowers resolution while you move, so enemies look blurrier. |
 | Radeon Super Resolution | OFF | Upscales the whole game; only for weak GPUs. |
@@ -69,7 +69,7 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 | Image Scaling | OFF | Upscaling filter; only for weak GPUs. |
 
 **Other NVIDIA Control Panel pages:**
-- Change resolution: Output dynamic range = Full, colour depth = highest. "Limited" makes blacks grey.
+- Change resolution: set Output dynamic range to match your display (Full for most PC monitors, Limited for many TVs), colour depth = highest. A mismatch makes blacks grey or crushed.
 - Adjust desktop size and position: Scaling = No scaling or Aspect ratio. "Perform scaling on" = Display (only matters for stretched res).
 - Set up G-SYNC: Enable for full screen mode (or windowed + full screen if you play borderless).
 
@@ -86,7 +86,7 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 
 | Setting | Set to | Why |
 |---|---|---|
-| Low Latency Mode | ON (On + Boost if offered) | Fewer queued frames. |
+| Low Latency Mode | ON (On + Boost if offered) | Fewer queued frames in DirectX 9 and DirectX 11 games. DirectX 12 and Vulkan games need in-game XeLL instead. |
 | Vertical Sync | Application Choice, with V-Sync OFF in game | Avoid forced V-Sync delay. |
 | Smooth Sync | OFF on a FreeSync/Adaptive-Sync monitor; optional on a 60 Hz/fixed monitor | Blurs tear lines with a tiny bit of delay. |
 | Adaptive Sync / VRR | ON if the monitor supports it | Smooth without V-Sync delay. |
@@ -96,8 +96,8 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 | Power plan / Graphics power (laptops) | Maximum Performance when plugged in | Stops the iGPU downclocking. |
 
 **Other Intel items:**
-- In games that have it, turn on Intel XeLL (Xe Low Latency) and XeSS only if you need more FPS.
-- Intel Arc REQUIRES Resizable BAR on in BIOS. Without it, FPS can drop by a lot.
+- In games that have it, turn on Intel XeLL (Xe Low Latency) for lower input delay. Turn on XeSS only if you need more FPS; it upscales.
+- Intel Arc works without Resizable BAR but loses a lot of FPS, so turn it on in BIOS when the board supports it.
 
 ---
 
@@ -105,13 +105,13 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 
 - **Display Mode:** Fullscreen.
 - **Limit FPS:** Off. Or cap at a stable number if you use FreeSync/G-SYNC.
-- **NVIDIA Reflex Low Latency:** On + Boost. On AMD: Anti-Lag 2 in AMD Software (ON).
+- **NVIDIA Reflex Low Latency:** On + Boost. On AMD: turn on the in-game AMD Anti-Lag 2 setting (and Radeon Anti-Lag in AMD Software).
 - **Multithreaded Rendering:** ON.
 - **Material / Texture / Detail / UI quality:** Low. Valorant is CPU-bound, and these barely cost FPS but add clutter.
 - **Vignette, Improve Clarity, Experimental Sharpening, Bloom, Distortion, Cast Shadows:** OFF.
 - **Anti-Aliasing:** MSAA 2x (or None). **Anisotropic Filtering:** 4x.
 - **VSync:** OFF.
-- **Settings > General > Mouse > Raw Input Buffer:** ON. It lowers mouse input delay; use it with a high polling-rate mouse.
+- **Raw Input Buffer:** nothing to set. Since patch 11.06 it is always on and the toggle is gone.
 - **Settings > General > Network Buffering:** Minimum. Raise it only if enemies teleport on a bad connection.
 
 ---

@@ -58,13 +58,13 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 2. Double-click `Run-RionTool.bat`. Accept the UAC prompt.
 3. Wait a few seconds for the scan, then start on the Home tab.
 
-To run the script directly:
+To run the script directly, open PowerShell in the repository folder and run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\RionTool.ps1
 ```
 
-`RionTool.ps1 -Cleanup` runs the recommended cleanup without opening the window.
+Add `-Cleanup` to run the recommended cleanup without opening the window. It still asks for administrator rights, and the cleanup output appears in the new elevated window.
 
 ## Undoing changes
 
