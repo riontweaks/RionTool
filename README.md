@@ -17,7 +17,7 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 
 **One-click optimize**
 - The Rion button in the bottom left ticks every Safe and Moderate gaming tweak, resets placebo tweaks and cleans junk files. You see the full list before anything changes.
-- Never touches Defender, Windows Update, Xbox, Bluetooth, Wi-Fi, Ethernet or anti-cheat settings.
+- Never turns off Defender, Windows Update, Xbox services, Bluetooth, Wi-Fi or Ethernet, and leaves VBS and anti-cheat settings alone. It can still apply Safe tweaks inside those areas, such as Wi-Fi and Ethernet power saving.
 
 **Tweaks**
 - About 360 settings across services, startup apps, scheduled tasks, privacy, AI features, power, CPU scheduling, GPU, memory, storage and input.
@@ -77,7 +77,7 @@ Add `-Cleanup` to run the recommended cleanup without opening the window. It sti
 
 - Microsoft Defender: Windows 11 blocks changes to the Defender services, even for administrators. The Defender option writes the official policies. They only take effect once Tamper Protection is off.
 - Game settings must be changed while the game is closed, because games write their settings back when they exit.
-- Driver app settings (AMD Software, NVIDIA Control Panel, Intel Graphics Software) can't be set safely from outside those apps. See [docs/Driver-Settings-Guide.md](docs/Driver-Settings-Guide.md) for what to change by hand.
+- Most driver app settings (AMD Software, Intel Graphics Software) can't be set safely from outside those apps. The NVIDIA tab applies the main NVIDIA 3D settings through NVIDIA Profile Inspector, and the Games tab sets Valorant and Fortnite options. See [docs/Driver-Settings-Guide.md](docs/Driver-Settings-Guide.md) for the rest.
 - NVIDIA profile options use NVIDIA Profile Inspector. The tool links to the official release page and never bundles it.
 
 ## Screenshots

@@ -1,5 +1,5 @@
 @{
-    Severity     = @('Error', 'Warning')
+    Severity     = @('ParseError', 'Error', 'Warning')
     ExcludeRules = @(
         'PSAvoidUsingWriteHost',
         'PSUseApprovedVerbs',
@@ -9,4 +9,10 @@
         'PSUseDeclaredVarsMoreThanAssignments',
         'PSAvoidGlobalVars'
     )
+    Rules        = @{
+        PSUseCompatibleSyntax = @{
+            Enable         = $true
+            TargetVersions = @('5.1')
+        }
+    }
 }

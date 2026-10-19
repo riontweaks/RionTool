@@ -23,10 +23,15 @@ function Test-IsAdmin {
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
  
+$script:PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    $ps64 = Join-Path $env:SystemRoot 'Sysnative\WindowsPowerShell\v1.0\powershell.exe'
+    if (Test-Path -LiteralPath $ps64) { Start-Process -FilePath $ps64 -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -STA -File "{0}"{1}' -f $PSCommandPath,$(if ($Cleanup) { ' -Cleanup' } else { '' })); return }
+}
 if (-not (Test-IsAdmin)) {
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName  = (Join-Path $PSHOME 'powershell.exe')
+        $psi.FileName  = $script:PowerShellExe
         $psi.Verb      = 'runas'
         $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -STA -File "{0}" -Elevated{1}' -f $PSCommandPath,$(if ($Cleanup) { ' -Cleanup' } else { '' })
         [void][System.Diagnostics.Process]::Start($psi)
@@ -134,7 +139,12 @@ function Save-Journal {
         return $true
     } catch { Write-Log ("Could not save original values: {0}" -f $_.Exception.Message) 'Warn'; return $false }
 }
-function Get-RecordKey { param($Record) return ("{0}|{1}|{2}" -f $Record.kind,$Record.path,$Record.name) }
+function Get-RecordKey { param($Record) if ($Record.scheme) { return ("{0}|{1}|{2}|{3}" -f $Record.kind,$Record.path,$Record.name,$Record.scheme) }; return ("{0}|{1}|{2}" -f $Record.kind,$Record.path,$Record.name) }
+function Get-ActiveSchemeGuid { return [regex]::Match((@(& powercfg.exe /getactivescheme 2>$null) -join ' '),'[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}').Value.ToLowerInvariant() }
+function Get-AmdDisplayKeys {
+    $base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+    return @(Get-ChildItem $base -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' } | Where-Object { $pv = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue; ([string]$pv.ProviderName + ' ' + [string]$pv.DriverDesc) -match '(?i)\bAMD\b|Radeon|\bATI\b|Advanced Micro Devices' } | ForEach-Object { $_.PSPath })
+}
 function Get-RegValueRecord {
     param([string]$Path,[string]$Name)
     try {
@@ -200,7 +210,21 @@ function Get-OriginalRecords {
         }
         'appxStartup' { foreach ($item in @(Get-AppxStartupStates $Action.families)) { $records += Get-RegValueRecord -Path $item.Path -Name 'State' } }
         'dropdownState' { $records += @(Get-DropdownRecords $Action.id) }
-        'powerSetting' { $r = Get-PowerIndexRecord $Action.setting $Action.sub; if ($r) { $records += $r } }
+        'powerSetting' { $r = Get-PowerIndexRecord $Action.setting $Action.sub; if ($r) { $r.scheme = Get-ActiveSchemeGuid; $records += $r } }
+        { $_ -in 'coreparking','setCoreParking' } { $r = Get-PowerIndexRecord 'CPMINCORES'; if ($r) { $r.scheme = Get-ActiveSchemeGuid; $records += $r } }
+        'svchost' { $records += Get-RegValueRecord -Path 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name 'SvcHostSplitThresholdInKB' }
+        'amdUlps' { foreach ($k in @(Get-AmdDisplayKeys)) { $records += Get-RegValueRecord -Path $k -Name 'EnableUlps' } }
+        'netPower' {
+            $physical = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            foreach ($pm in @(Get-NetAdapterPowerManagement -ErrorAction SilentlyContinue | Where-Object { $physical -contains $_.Name })) { $records += @{ kind='netPowerState'; path=$pm.Name; name='wake'; magic=[string]$pm.WakeOnMagicPacket; pattern=[string]$pm.WakeOnPattern } }
+        }
+        'netRss' { foreach ($r in @(Get-NetAdapterRss -ErrorAction SilentlyContinue)) { $records += @{ kind='netRssState'; path=$r.Name; name='rss'; enabled=[bool]$r.Enabled } } }
+        'netRsc' { foreach ($r in @(Get-NetAdapterRsc -ErrorAction SilentlyContinue)) { $records += @{ kind='netRscState'; path=$r.Name; name='rsc'; v4=[bool]$r.IPv4Enabled; v6=[bool]$r.IPv6Enabled } } }
+        'netbios' { foreach ($c in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = True' -ErrorAction SilentlyContinue)) { $records += @{ kind='netbiosState'; path=[string]$c.SettingID; name=[string]$c.Description; value=[int]$c.TcpipNetbiosOptions } } }
+        'teredo' { try { $tc = Get-NetTeredoConfiguration -ErrorAction Stop; $records += @{ kind='teredoState'; path='teredo'; name='type'; value=[string]$tc.Type } } catch { } }
+        'usbPower' {
+            try { foreach ($d in @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop)) { $records += @{ kind='usbPowerState'; path=[string]$d.InstanceName; name='enable'; enabled=[bool]$d.Enable } } } catch { }
+        }
         'mmagent' { try { $m = Get-MMAgent -ErrorAction Stop; $records += @{ kind='mmAgent'; path='mmagent'; name=[string]$Action.feature; enabled=[bool]$m.($Action.feature) } } catch { } }
         'runkeyAll' { foreach ($e in @(Get-StartupEntries)) { $records += Get-RegValueRecord -Path $e.Approved -Name $e.Name } }
         'dxGlobal' { $records += Get-RegValueRecord -Path $script:DxPrefsPath -Name 'DirectXUserGlobalSettings' }
@@ -227,7 +251,6 @@ function Get-PowerIndexRecord {
     if ($script:PowerIndexCache) {
         $hit = $script:PowerIndexCache[$Alias.ToUpperInvariant()]; if (-not $hit) { $hit = $script:PowerIndexCache[$Alias.ToLowerInvariant()] }
         if ($hit -and $null -ne $hit.ac) { return @{ kind='powerIndex'; path=$Sub; name=$Alias; ac=[int]$hit.ac; dc=[int]$hit.dc } }
-        return $null
     }
     try {
         $hex = @([regex]::Matches((@(& powercfg.exe /qh SCHEME_CURRENT $Sub $Alias 2>$null) -join "`n"),'0x[0-9a-fA-F]{8}') | ForEach-Object { $_.Value })
@@ -912,12 +935,17 @@ function Save-OriginalRecords {
     $changed = $false
     foreach ($action in @($Actions)) {
         foreach ($record in @(Get-OriginalRecords $action)) {
-            if (Test-RecordAtTarget $record $action) { continue }
+            if (Test-RecordAtTarget $record $action) { $record = $record.Clone(); $record['untouched'] = $true }
             if (-not $script:Journal.ContainsKey($Id)) { $script:Journal[$Id] = @() }
             $list = [System.Collections.ArrayList]@($script:Journal[$Id])
             $key = Get-RecordKey $record
-            if (-not @($list | Where-Object { (Get-RecordKey $_) -eq $key }).Count) {
+            $existing = @($list | Where-Object { (Get-RecordKey $_) -eq $key }) | Select-Object -First 1
+            if (-not $existing) {
                 [void]$list.Add($record)
+                $script:Journal[$Id] = @($list)
+                $changed = $true
+            } elseif ($existing.untouched -and -not $record['untouched']) {
+                $list[$list.IndexOf($existing)] = $record
                 $script:Journal[$Id] = @($list)
                 $changed = $true
             }
@@ -974,10 +1002,18 @@ function Restore-OriginalRecord {
             if ($Record.existed -and $LASTEXITCODE -ne 0) { throw ("bcdedit could not restore {0}={1}: {2}" -f $Record.name,$Record.value,((@($out) -join ' ').Trim())) }
         }
         'powerIndex' {
-            & powercfg.exe -setacvalueindex SCHEME_CURRENT $Record.path $Record.name ([int]$Record.ac) 2>$null
-            & powercfg.exe -setdcvalueindex SCHEME_CURRENT $Record.path $Record.name ([int]$Record.dc) 2>$null
-            & powercfg.exe -S SCHEME_CURRENT 2>$null
+            $sch = if ($Record.scheme) { [string]$Record.scheme } else { 'SCHEME_CURRENT' }
+            & powercfg.exe -setacvalueindex $sch $Record.path $Record.name ([int]$Record.ac) 2>$null
+            if ($LASTEXITCODE -ne 0) { throw ("Power plan {0} could not take {1} back (it may have been deleted)." -f $sch,$Record.name) }
+            & powercfg.exe -setdcvalueindex $sch $Record.path $Record.name ([int]$Record.dc) 2>$null
+            if ($sch -eq 'SCHEME_CURRENT' -or $sch -eq (Get-ActiveSchemeGuid)) { & powercfg.exe -S $sch 2>$null }
         }
+        'netPowerState' { if (Get-NetAdapter -Name $Record.path -ErrorAction SilentlyContinue) { $args2 = @{ Name=$Record.path; ErrorAction='Stop' }; if ([string]$Record.magic -in 'Enabled','Disabled') { $args2.WakeOnMagicPacket = [string]$Record.magic }; if ([string]$Record.pattern -in 'Enabled','Disabled') { $args2.WakeOnPattern = [string]$Record.pattern }; Set-NetAdapterPowerManagement @args2 } }
+        'netRssState' { if (Get-NetAdapter -Name $Record.path -ErrorAction SilentlyContinue) { Set-NetAdapterRss -Name $Record.path -Enabled ([bool]$Record.enabled) -ErrorAction Stop } }
+        'netRscState' { if (Get-NetAdapter -Name $Record.path -ErrorAction SilentlyContinue) { Set-NetAdapterRsc -Name $Record.path -IPv4Enabled ([bool]$Record.v4) -IPv6Enabled ([bool]$Record.v6) -ErrorAction Stop } }
+        'netbiosState' { $c = Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction SilentlyContinue | Where-Object { [string]$_.SettingID -eq [string]$Record.path } | Select-Object -First 1; if ($c) { Invoke-CimMethod -InputObject $c -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions=[uint32]$Record.value } -ErrorAction Stop | Out-Null } }
+        'teredoState' { if ([string]$Record.value) { Set-NetTeredoConfiguration -Type ([string]$Record.value) -ErrorAction Stop } }
+        'usbPowerState' { foreach ($d in @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue | Where-Object { [string]$_.InstanceName -eq [string]$Record.path })) { Set-CimInstance -InputObject $d -Property @{ Enable=[bool]$Record.enabled } -ErrorAction Stop } }
         'featureState' { Invoke-Action @{ kind='optionalFeature'; names=@($Record.name); enable=[bool]$Record.enabled } }
         'throttleApp' { Invoke-Action @{ kind='throttleApp'; exe=[string]$Record.name; exempt=[bool]$Record.exempt } }
         'qosPolicy' { Invoke-Action @{ kind='qosGame'; exe=[string]$Record.exe; enable=[bool]$Record.existed } }
@@ -2403,7 +2439,7 @@ foreach ($t in $script:Tweaks) {
 
 $script:LowerFpsIds = @('gpu.mpo','cpu.ppm.idle','cpu.ppm.idledepth','cpu.parking')
 $script:RiskyIds = @('feat.net.wifi','feat.net.eth','svc.dev.print','svc.dev.bluetooth','svc.dev.webcam','svc.dev.pairing','sec.updates','sec.defender','sec.encryption.decrypt','svc.feat.account','svc.feat.hello','feat.opt.hypervisor','feat.cloud.onedrive','svc.feat.notifications','svc.feat.bitlocker','svc.feat.family','gpu.mpo','cpu.ppm.idle','cpu.ppm.idledepth','cpu.parking','net.wifi.location','feat.privacy.appperms')
-$script:ModerateIds = @('feat.sys.hibernate','svc.xbox.live','task.xblgamesave','net.intmod','gpu.hags','gpu.msi','gpu.mpo.minfps','gpu.amd.ulps','cpu.boost','cpu.ppm.responsive','cpu.ppm.throttle','cpu.ppm.minstate','cpu.ppm.hetero','cpu.ppm.perfepp','cpu.ppm.maxfreq','cpu.amd.x3dcache','mem.compression','mem.pagecombining','svc.bg.sysmain','pwr.pcie.aspm','pwr.usb.suspend','input.usb.power','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','net.autotune','feat.opt.media','svc.net.iphlp','svc.feat.phishing','svc.dev.printbroker','task.familysafety')
+$script:ModerateIds = @('svc.bg.diag','feat.sys.hibernate','svc.xbox.live','task.xblgamesave','net.intmod','gpu.hags','gpu.msi','gpu.mpo.minfps','gpu.amd.ulps','cpu.boost','cpu.ppm.responsive','cpu.ppm.throttle','cpu.ppm.minstate','cpu.ppm.hetero','cpu.ppm.perfepp','cpu.ppm.maxfreq','cpu.amd.x3dcache','mem.compression','mem.pagecombining','svc.bg.sysmain','pwr.pcie.aspm','pwr.usb.suspend','input.usb.power','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','net.autotune','feat.opt.media','svc.net.iphlp','svc.feat.phishing','svc.dev.printbroker','task.familysafety')
 foreach ($t in $script:Tweaks) {
     if ($t.Type -eq 'info') { continue }
     $t.Risk = if ($script:RiskyIds -contains $t.Id) { 'Risky' } elseif ($script:ModerateIds -contains $t.Id) { 'Moderate' } else { 'Safe' }
@@ -2798,6 +2834,7 @@ function Initialize-DetectionCaches {
             if ($line -match 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)') { $cur.ac = [Convert]::ToInt32($Matches[1],16); continue }
             if ($line -match 'Current DC Power Setting Index:\s*0x([0-9a-fA-F]+)') { $cur.dc = [Convert]::ToInt32($Matches[1],16) }
         }
+        if (-not @($script:PowerIndexCache.Values | Where-Object { $_ -is [hashtable] -and $null -ne $_.ac }).Count) { $script:PowerIndexCache = $null }
     } catch { $script:PowerIndexCache = $null }
     try { $script:NetPropCache = @(Get-NetAdapterAdvancedProperty -AllProperties -ErrorAction Stop) } catch { $script:NetPropCache = $null }
 }
@@ -3208,6 +3245,7 @@ function Invoke-Action {
             $records = @($script:Journal[$Action.id])
             $failed = @()
             for ($i = $records.Count - 1; $i -ge 0; $i--) {
+                if ($records[$i].untouched) { continue }
                 try { Restore-OriginalRecord $records[$i] }
                 catch {
                     Write-Log ("Could not restore {0}: {1}" -f $records[$i].name,$_.Exception.Message) 'Warn'
@@ -3390,10 +3428,7 @@ function Invoke-Action {
         'setDns' { Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object { try { if($Action.servers){Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $Action.servers -ErrorAction Stop}else{Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop} } catch{} } }
         'setCoreParking' { if($Action.park -eq 'Default'){return}; $min=if([bool]$Action.park){0}else{100}; powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES $min 2>$null; powercfg -setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES $min 2>$null; powercfg -S SCHEME_CURRENT 2>$null }
         'amdUlps' {
-            $base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
-            Get-ChildItem $base -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
-                Set-RegValue -Path $_.PSPath -Name 'EnableUlps' -Value ([int][bool]$Action.enable) -Type DWord
-            }
+            foreach ($k in @(Get-AmdDisplayKeys)) { Set-RegValue -Path $k -Name 'EnableUlps' -Value ([int][bool]$Action.enable) -Type DWord }
         }
         'powerSetting' {
             if ([string]$Action.value -eq 'Default') {
@@ -4355,8 +4390,10 @@ function Repair-StorePackage {
     param($App,[switch]$Reinstall)
     $reRegistered = $false
     $packages = @()
-    try { $packages += Get-AppxPackage -Name $App.Packages -ErrorAction SilentlyContinue } catch { }
-    try { $packages += Get-AppxPackage -AllUsers -Name $App.Packages -ErrorAction SilentlyContinue } catch { }
+    foreach ($pn in @($App.Packages)) {
+        try { $packages += @(Get-AppxPackage -Name $pn -ErrorAction SilentlyContinue) } catch { }
+        try { $packages += @(Get-AppxPackage -AllUsers -Name $pn -ErrorAction SilentlyContinue) } catch { }
+    }
     $packages = @($packages | Where-Object { $_.InstallLocation } | Sort-Object PackageFullName -Unique)
     foreach ($pkg in $packages) {
         $manifest = Join-Path $pkg.InstallLocation 'AppxManifest.xml'
@@ -4530,6 +4567,20 @@ $script:ExtraPlaceboValues = @(
     @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; Pattern='^EnableSuperfetch$'; Bad=$null; Default=$null; Sev='info'; Title='Old Superfetch value'; Why='A Windows Vista/7 value. Windows 10 and 11 ignore it; the SysMain service controls prefetching.' }
     @{ Path='HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'; Pattern='^NtfsMemoryUsage$'; Bad=$null; Default=$null; Sev='info'; Title='Old NTFS memory value'; Why='Raises NTFS paged pool use for file servers. No effect on game loading on an SSD.' }
 )
+$script:UsbVendors = @{ '0416'='Winbond / Nuvoton (often an RGB, fan-hub or AIO cooler controller)'; '046D'='Logitech'; '1B1C'='Corsair'; '1532'='Razer'; '0B05'='ASUS'; '1462'='MSI'; '048D'='Integrated Technology Express (motherboard RGB controller)'; '0CF2'='ENE Technology (RGB controller)'; '26CE'='ASRock'; '0951'='HyperX / Kingston'; '1038'='SteelSeries'; '1E71'='NZXT'; '2516'='Cooler Master'; '0C45'='Microdia / Sonix (keyboards, webcams)'; '258A'='Sinowealth (keyboards and mice)'; '1A86'='WCH (USB serial chips)'; '8087'='Intel'; '1022'='AMD'; '045E'='Microsoft'; '054C'='Sony'; '057E'='Nintendo'; '28DE'='Valve'; '31E3'='Wooting' }
+function Reset-RionDevice {
+    param([string]$InstanceId)
+    $pnp = Join-Path $env:SystemRoot 'System32\pnputil.exe'
+    Write-Log ('Removing {0} from Windows and detecting it again...' -f $InstanceId) 'Action'
+    $r = & $pnp /remove-device $InstanceId 2>&1 | Out-String
+    Start-Sleep -Seconds 2
+    $null = & $pnp /scan-devices 2>&1
+    Start-Sleep -Seconds 3
+    $now = Get-CimInstance Win32_PnPEntity -Filter ("PNPDeviceID='{0}'" -f ($InstanceId -replace '\\','\\')) -ErrorAction SilentlyContinue
+    if ($now -and [int]$now.ConfigManagerErrorCode -eq 0) { Write-Log 'The device started normally after being detected again.' 'Success' }
+    elseif (-not $now) { Write-Log 'The device was removed and has not come back yet. Unplug it and plug it in again, or restart.' 'Warn' }
+    else { Write-Log ('The device still reports error code {0}. Unplug it and use a rear USB port, then update its software or firmware from the maker. Output: {1}' -f $now.ConfigManagerErrorCode,$r.Trim()) 'Warn' }
+}
 function Get-StartSearchProblems {
     $why = @()
     if (Test-Path -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\8\1694661260') { $why += 'the Windows Search WebView2 override is set' }
@@ -5130,6 +5181,7 @@ function Invoke-Cleanup {
     param([string[]]$Ids)
     $total = 0; $lines = @()
     foreach ($cat in @($script:CleanupCategories | Where-Object { $Ids -contains $_.Id })) {
+        Update-UiNow ('Cleaning {0}...' -f $cat.Label)
         Write-Log ("Cleaning {0}..." -f $cat.Label) 'Action'
         $r = Invoke-CleanupCategory $cat
         $total += $r.Freed
@@ -5173,7 +5225,7 @@ function New-RionShortcut {
     $lnk = Join-Path $desktop 'Rion Tool.lnk'
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($lnk)
-    $sc.TargetPath = Join-Path $PSHOME 'powershell.exe'
+    $sc.TargetPath = $script:PowerShellExe
     $sc.Arguments = ('-NoProfile -ExecutionPolicy Bypass -STA -File "{0}"' -f $PSCommandPath)
     $sc.WorkingDirectory = Split-Path -Parent $PSCommandPath
     $sc.IconLocation = ('{0},0' -f (Join-Path $env:SystemRoot 'System32\imageres.dll'))
@@ -5416,7 +5468,15 @@ $script:HealthChecks = @(
             $code = [int]$d.ConfigManagerErrorCode
             $what = if ($codes.ContainsKey($code)) { $codes[$code] } else { 'has a problem' }
             $name = if ($d.Name) { [string]$d.Name } else { $id }
-            New-HealthFinding 'Drivers' 'warn' 4 ('{0} {1}' -f $name,$what) ('Device Manager error code {0}. Reinstall or update this device''s driver; if it is hardware you no longer use, disable it in Device Manager instead.' -f $code) 'Open Device Manager' { Start-Process devmgmt.msc }
+            $busDesc = ''; try { $busDesc = [string](Get-PnpDeviceProperty -InstanceId $id -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' -ErrorAction Stop).Data } catch { }
+            $vendor = ''; if ($id -match 'VID_([0-9A-F]{4})') { $vendor = [string]$script:UsbVendors[$Matches[1]] }
+            $label = $name
+            if ($busDesc -and $busDesc -ne $name) { $label = ('{0} ({1})' -f $name,$busDesc) }
+            $hint = if ($vendor) { (' Made by {0}.' -f $vendor) } else { '' }
+            $usb = $id -like 'USB\*'
+            $advice = if ($code -eq 10 -and $usb) { 'The device answered but failed to start. The fix removes it from Windows and lets Windows detect it again. If it comes back with the same error: unplug it and plug it into a rear USB port (a USB 2.0 port for RGB, fan and cooler controllers), then update the software or firmware from its maker. Disable it in Device Manager if you do not use it.' } else { 'The fix removes it from Windows and lets Windows detect it again. If the error comes back, reinstall or update its driver from the maker, or disable it in Device Manager if you do not use it.' }
+            $fix = [scriptblock]::Create(("Reset-RionDevice -InstanceId '{0}'" -f ($id -replace "'","''")))
+            New-HealthFinding 'Drivers' 'warn' 4 ('{0} {1}' -f $label,$what) (('Device Manager error code {0}.{1} ' -f $code,$hint) + $advice) 'Reset this device' $fix
         }
     } }
     @{ Category='Risky settings'; Run={
@@ -5535,7 +5595,11 @@ $script:HealthChecks = @(
         $other = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | Where-Object { [string]$_.displayName -notmatch '(?i)Windows Defender|Microsoft Defender' -and (([int]$_.productState -shr 12) -band 0xF) -eq 1 })
         if ($other.Count) { return }
         $m = $null; try { $m = Get-MpComputerStatus -ErrorAction Stop } catch { }
-        if (-not $m -or -not $m.RealTimeProtectionEnabled) { New-HealthFinding 'Security and recovery' 'bad' 12 'No real-time antivirus protection' 'Microsoft Defender real-time protection is off and no other antivirus is active, so downloads, mods and cracked tools run unchecked.' 'Open Windows Security' { Start-Process 'windowsdefender://threatsettings' } }
+        if ($m -and $m.RealTimeProtectionEnabled) { return }
+        $wd = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+        $byChoice = ((Get-RegNumber $wd 'DisableAntiSpyware') -eq 1) -or ((Get-RegNumber $wd 'DisableAntiVirus') -eq 1) -or ((Get-RegNumber ($wd + '\Real-Time Protection') 'DisableRealtimeMonitoring') -eq 1) -or ((Get-ServiceStartValue 'WinDefend') -eq 4) -or $script:Journal.ContainsKey('sec.defender')
+        if ($byChoice) { New-HealthFinding 'Security and recovery' 'info' 0 'Microsoft Defender is turned off' 'It was switched off on purpose (a policy, a disabled service or the Rion Tool option), and no other antivirus is active. Downloads, mods and tools are not scanned. Use the fix to turn it back on whenever you want.' 'Turn Defender back on' { Repair-Defender } }
+        else { New-HealthFinding 'Security and recovery' 'warn' 6 'No real-time antivirus protection' 'Microsoft Defender real-time protection is off and no other antivirus is active, so downloads, mods and tools run unchecked.' 'Turn Defender back on' { Repair-Defender } }
     } }
     @{ Category='Security and recovery'; Run={
         $off = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
@@ -5915,7 +5979,11 @@ function Invoke-OneClickOptimize {
     $script:AllPagesPreset = $null
     $PresetCombo.SelectedIndex = -1
     $PresetCombo.SelectedItem = $Mode
+    $curTab = if ($Tabs.SelectedItem.Tag -is [string]) { [string]$Tabs.SelectedItem.Tag } else { [string]$Tabs.SelectedItem.Header }
+    if ($curTab -eq 'Games') { Select-RionTab 'Home' }
+    $script:LastApplyOutcome = 'cancelled'
     $ApplyBtn.RaiseEvent((New-Object Windows.RoutedEventArgs ([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    if ($script:LastApplyOutcome -eq 'cancelled') { Write-Log 'One-click optimize was cancelled; no placebo values were reset and no files were cleaned.' 'Info'; return }
     $cleared = 0; if ($placebo.Count) { $cleared = Clear-PlaceboTweaks -Quiet -Items $placebo }
     $r = Invoke-SelectedCleanup -Ids $junkIds -Quiet
     try { Update-HomeHealth } catch { }
@@ -6434,6 +6502,18 @@ function Read-IniLines {
     if ($Path -and (Test-Path -LiteralPath $Path)) { foreach ($x in [IO.File]::ReadAllLines($Path)) { $l.Add($x) } }
     return ,$l
 }
+function Get-IniFileMeta {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return @{ Existed=$false; NewLine="`r`n"; Final=$true; Encoding=(New-Object Text.UTF8Encoding $false); Text='' } }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $enc = New-Object Text.UTF8Encoding $false; $skip = 0
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $enc = New-Object Text.UTF8Encoding $true; $skip = 3 }
+    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { $enc = New-Object Text.UnicodeEncoding $false,$true; $skip = 2 }
+    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) { $enc = New-Object Text.UnicodeEncoding $true,$true; $skip = 2 }
+    $text = $enc.GetString($bytes,$skip,$bytes.Length - $skip)
+    $nl = if ($text.Contains("`r`n")) { "`r`n" } elseif ($text.Contains("`n")) { "`n" } else { "`r`n" }
+    return @{ Existed=$true; NewLine=$nl; Final=($text.EndsWith("`n")); Encoding=$enc; Text=$text }
+}
 function Get-IniValue {
     param($Lines,[string]$Section,[string]$Key)
     $in = $false
@@ -6643,9 +6723,9 @@ function Load-GameState {
         foreach ($r in $Game.Rows) { $r.Combo.IsEnabled = $false }
         return
     }
-    $lines = @{}
-    foreach ($k in $src.Files.Keys) { $lines[$k] = (Read-IniLines $src.Files[$k]) }
-    $state = @{ Source=$src; Lines=$lines; Exe=(Find-GameExe $Game.Key) }
+    $lines = @{}; $metas = @{}
+    foreach ($k in $src.Files.Keys) { $lines[$k] = (Read-IniLines $src.Files[$k]); $metas[$k] = (Get-IniFileMeta $src.Files[$k]) }
+    $state = @{ Source=$src; Lines=$lines; Meta=$metas; Exe=(Find-GameExe $Game.Key) }
     $Game.State = $state
     foreach ($r in $Game.Rows) {
         $r.Combo.Items.Clear()
@@ -6674,20 +6754,23 @@ function Save-GameState {
     New-Item -ItemType Directory -Path $bdir -Force | Out-Null
     $paths = @{}
     foreach ($k in $state.Source.Files.Keys) { $fp = $state.Source.Files[$k]; if ($fp -and (Test-Path -LiteralPath $fp)) { Copy-Item -LiteralPath $fp -Destination (Join-Path $bdir ($k + '.ini')) -Force; $paths[$k] = $fp } }
-    $meta = @{ Files=$paths; Exe=$state.Exe; Layers=$(if ($state.Exe) { Get-LayerString $state.Exe } else { $null }) }
+    $created = @(foreach ($k in $state.Source.Files.Keys) { $fp = $state.Source.Files[$k]; if ($fp -and -not (Test-Path -LiteralPath $fp)) { $fp } })
+    $meta = @{ Files=$paths; Created=$created; Exe=$state.Exe; Layers=$(if ($state.Exe) { Get-LayerString $state.Exe } else { $null }) }
     $meta | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bdir 'backup.json') -Encoding UTF8
     foreach ($r in $toWrite) {
         $o = $r.Def.Opts | Where-Object { $_.Text -eq [string]$r.Combo.SelectedItem } | Select-Object -First 1
         foreach ($k in $o.Values.Keys) { Set-GameFileValue $Game $state $k ([string]$o.Values[$k]) }
     }
-    $enc = New-Object Text.UTF8Encoding $false
     foreach ($k in $state.Source.Files.Keys) {
         $fp = $state.Source.Files[$k]; $ln = $state.Lines[$k]
         if (-not $fp -or -not $ln -or -not $ln.Count) { continue }
+        $fm = $state.Meta[$k]; if (-not $fm) { $fm = Get-IniFileMeta $fp }
+        $newText = ($ln -join $fm.NewLine) + $(if ($fm.Final -or -not $fm.Existed) { $fm.NewLine } else { '' })
+        if ($fm.Existed -and $newText -eq $fm.Text) { continue }
         $dir = Split-Path $fp
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         if (Test-Path -LiteralPath $fp) { $it = Get-Item -LiteralPath $fp; if ($it.IsReadOnly) { $it.IsReadOnly = $false } }
-        [IO.File]::WriteAllText($fp,(($ln -join "`r`n") + "`r`n"),$enc)
+        [IO.File]::WriteAllText($fp,$newText,$fm.Encoding)
     }
     $summary = @($changed | ForEach-Object { '{0}: {1}' -f $_.Def.Label,$_.Combo.SelectedItem })
     Write-Log ('{0}: saved {1} change(s) ({2}). Backup: {3}' -f $Game.Title,$changed.Count,($summary -join ', '),$bdir) 'Success'
@@ -6708,6 +6791,7 @@ function Restore-GameBackup {
     if ([System.Windows.MessageBox]::Show(('Put back the {0} settings saved before the change at {1}?' -f $Game.Title,$last.Name),'Game settings','OKCancel','Question') -ne 'OK') { return }
     $meta = Get-Content -LiteralPath (Join-Path $last.FullName 'backup.json') -Raw | ConvertFrom-Json
     foreach ($p in $meta.Files.PSObject.Properties) { $src = Join-Path $last.FullName ($p.Name + '.ini'); if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination ([string]$p.Value) -Force } }
+    foreach ($c in @($meta.Created)) { if ($c -and (Test-Path -LiteralPath ([string]$c))) { Remove-Item -LiteralPath ([string]$c) -Force -ErrorAction SilentlyContinue } }
     if ($meta.Exe) { Set-LayerString ([string]$meta.Exe) ([string]$meta.Layers) }
     Remove-Item -LiteralPath $last.FullName -Recurse -Force
     Write-Log ('{0} settings restored from the backup made at {1}.' -f $Game.Title,$last.Name) 'Success'
@@ -6977,7 +7061,7 @@ $ViewRisky.Add_Click({ Update-ViewFilter })
  
 $script:NoPreset = @('feat.net.wifi','feat.net.eth','gpu.msi')
 foreach ($p in @('Recommended','Gamer max','Minimal','Max (incl. Risky)','None')) { [void]$PresetCombo.Items.Add($p) }
-$script:GamerMaxExclude = @('startup.all','gpu.vrr.windowed','feat.lighting.off','feat.taskbar.simple','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
+$script:GamerMaxExclude = @('svc.bg.diag','net.teredo','startup.all','gpu.vrr.windowed','feat.lighting.off','feat.taskbar.simple','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
 function Test-GamerMax {
     param($Tweak)
     if ($Tweak.Risk -notin 'Safe','Moderate') { return $false }
@@ -7084,9 +7168,9 @@ function Get-PendingTweaks {
             if ($desiredApplied -ne $currentlyApplied -and ($desiredApplied -or @(Get-RevertActions $e.Tweak).Count -gt 0)) {
                 $pending += @{ Tweak=$e.Tweak; Choice=$null; TargetApplied=$desiredApplied }
             }
-        } elseif ($e.Combo -and $e.Combo.IsEnabled -and $e.Touched -and $e.Combo.SelectedIndex -eq 0 -and $script:Journal.ContainsKey($id)) {
+        } elseif ($e.Combo -and $e.Combo.IsEnabled -and $e.Touched -and $e.Combo.SelectedIndex -eq 0 -and $script:Journal.ContainsKey($id) -and [string]@($e.Tweak.Options)[0] -match '^Default') {
             $pending += @{ Tweak=$e.Tweak; Choice=$null; TargetApplied=$false }
-        } elseif ($e.Combo -and $e.Combo.IsEnabled -and $e.Touched -and $e.Combo.SelectedIndex -gt 0) {
+        } elseif ($e.Combo -and $e.Combo.IsEnabled -and $e.Touched -and ($e.Combo.SelectedIndex -gt 0 -or ([string]@($e.Tweak.Options)[0] -notmatch '^Default' -and $e.Combo.SelectedIndex -eq 0))) {
             $pending += @{ Tweak=$e.Tweak; Choice=[string]$e.Combo.SelectedItem; TargetApplied=$true }
         }
     }
@@ -7279,6 +7363,16 @@ function Show-ApplyDialog {
     return @{Confirmed=($confirmed -eq $true);Apps=@($dlg.Tag.Apps)}
 }
  
+function Update-UiNow {
+    param([string]$Status)
+    try {
+        if (-not $script:Window -or -not $script:Window.IsVisible) { return }
+        if ($Status -and $script:StatusLabel) { $script:StatusLabel.Text = $Status }
+        $frame = New-Object Windows.Threading.DispatcherFrame
+        [void][Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background,[Windows.Threading.DispatcherOperationCallback]{ param($f) $f.Continue = $false; return $null },$frame)
+        [Windows.Threading.Dispatcher]::PushFrame($frame)
+    } catch { }
+}
 function Get-TweakChildren {
     param($Tweak,[bool]$TargetApplied=$true)
     $children = @()
@@ -7308,7 +7402,10 @@ function Invoke-ApplySelected {
         if ($RestoreFirst) { New-RestorePoint | Out-Null }
  
         $touchedService = $false
+        $nodeIndex = 0; $nodeTotal = @($Nodes).Count
         foreach ($n in $Nodes) {
+            $nodeIndex++
+            Update-UiNow ('Applying {0} of {1}: {2}' -f $nodeIndex,$nodeTotal,$n.Tweak.Label)
             $hasSelectedChild = [bool]@($n.Children | Where-Object { $_.Check.IsChecked }).Count
             if ($n.Children.Count -gt 0) {
                 if (-not $hasSelectedChild) { continue }
@@ -7330,6 +7427,12 @@ function Invoke-ApplySelected {
                             Invoke-Action $c.Data.Action
                             if ($c.Data.Action.kind -eq 'service') { $touchedService = $true }
                         }
+                    }
+                    if (@($n.Children | Where-Object { $_.Check.IsChecked }).Count) {
+                        $childKinds = 'service','taskFolder','task','taskNamePattern','dxApp','throttleApp','msiMode','optionalFeature'
+                        $loose = @($(if ($n.TargetApplied) { @($t.Apply) } else { @(Get-RevertActions $t) }) | Where-Object { $childKinds -notcontains $_.kind })
+                        if ($n.TargetApplied -and $loose.Count) { Save-OriginalRecords -Id $t.Id -Actions $loose }
+                        foreach ($a in $loose) { Invoke-Action $a }
                     }
                 } elseif ($t.Type -eq 'dropdown' -and $n.Choice) {
                     Save-OriginalRecords -Id $t.Id -Actions @(@{kind='dropdownState';id=$t.Id})
@@ -7425,6 +7528,7 @@ function Set-DiscordHwAccel {
 }
  
 $ApplyBtn.Add_Click({
+    $script:LastApplyOutcome = 'cancelled'
     $curTab = if ($Tabs.SelectedItem.Tag -is [string]) { [string]$Tabs.SelectedItem.Tag } else { [string]$Tabs.SelectedItem.Header }
     if ($curTab -eq 'Games') { try { Save-AllGames } catch { Write-Log ('Game settings: save failed: {0}' -f $_.Exception.Message) 'Error' }; return }
     $pending = @(Get-PendingTweaks)
@@ -7433,6 +7537,7 @@ $ApplyBtn.Add_Click({
     $reinstallPending=@($script:ReinstallChecks | Where-Object { $_.IsChecked })
     if ($reinstallPending.Count) { try { Invoke-AppReinstall $reinstallPending } catch { Write-Log ('Reinstall failed: {0}' -f $_.Exception.Message) 'Error' }; if ($pending.Count -eq 0 -and $appPending.Count -eq 0) { return } }
     if ($pending.Count -eq 0 -and $appPending.Count -eq 0) {
+        $script:LastApplyOutcome = 'nothing'
         if (Test-GamesPending) { try { Save-AllGames } catch { Write-Log ('Game settings: save failed: {0}' -f $_.Exception.Message) 'Error' }; return }
         [System.Windows.MessageBox]::Show("Nothing to change. Ticked settings are already applied.`r`n`r`nTick a setting to apply it, or untick an applied one to restore its original value.",'Rion Tool','OK','Information') | Out-Null
         return
@@ -7467,6 +7572,7 @@ $ApplyBtn.Add_Click({
     }
     $applyResult=Show-ApplyDialog -Pending $pending -Apps $appPending
     if(-not $applyResult.Confirmed){return}
+    $script:LastApplyOutcome = 'applied'
     if($applyResult.Apps.Count){Invoke-DebloatApply -Candidates $applyResult.Apps -Reviewed -RestoreHandled}
 })
 
@@ -7474,15 +7580,12 @@ $ApplyBtn.Add_Click({
  
 function Invoke-FullRevert {
     foreach ($id in @($script:Journal.Keys)) {
-        try { Invoke-Action @{ kind='restoreRecords'; id=$id } } catch { Write-Log ("Revert failed: {0}" -f $id) 'Warn' }
-    }
-    foreach ($t in $script:Tweaks) {
-        if ((-not $t.Revert -or $t.Revert.Count -eq 0) -or $script:Journal.ContainsKey($t.Id)) { continue }
+        $t = $script:Tweaks | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        $actions = if ($t) { @(Get-RevertActions $t) } else { @(@{ kind='restoreRecords'; id=$id }) }
         try {
-            Write-Log ("Reverting {0}..." -f $t.Label) 'Action'
-            foreach ($a in $t.Revert) { Invoke-Action $a }
-            Write-Log ("Reverted {0}" -f $t.Label) 'Success'
-        } catch { Write-Log ("Revert failed: {0}" -f $t.Label) 'Warn' }
+            Write-Log ("Reverting {0}..." -f $(if ($t) { $t.Label } else { $id })) 'Action'
+            foreach ($a in $actions) { Invoke-Action $a }
+        } catch { Write-Log ("Revert failed: {0} - {1}" -f $id,$_.Exception.Message) 'Warn' }
     }
     foreach ($name in @($script:ServiceBackups.Keys)) {
         try {
@@ -7516,12 +7619,20 @@ function Build-DebloatList {
     param([bool]$AutoCheck,[bool]$ApplyPreset=$true)
     $dStoreList.Children.Clear(); $dProgramList.Children.Clear()
     $script:DebloatChecks = @(); $script:ProgramChecks = @()
-    $storeHeader = New-Object Windows.Controls.TextBlock; $storeHeader.Text='Installed Store apps for this user, including apps Windows installs or pins on its own (tick to remove). Names come from this Windows installation. Windows components, frameworks, and WinGet catalogs are not apps in this list. Recommendations are apps Windows preinstalls or promotes that nothing else depends on; they only appear when installed and removable here. Removed apps can be reinstalled from Microsoft Store.'; Set-ThemeBrush $storeHeader 'Foreground' 'SubText'; $storeHeader.Margin='0,0,0,8'; $storeHeader.TextWrapping='Wrap'
+    $storeHeader = New-Object Windows.Controls.TextBlock; $storeHeader.Text='Installed Store apps for this user, including apps Windows installs or pins on its own (tick to remove). WhatsApp, LinkedIn and other tiles in Start that are not listed here are install links, not installed apps: right-click them in Start and choose Unpin. Names come from this Windows installation. Windows components, frameworks, and WinGet catalogs are not apps in this list. Recommendations are apps Windows preinstalls or promotes that nothing else depends on; they only appear when installed and removable here. Removed apps can be reinstalled from Microsoft Store.'; Set-ThemeBrush $storeHeader 'Foreground' 'SubText'; $storeHeader.Margin='0,0,0,8'; $storeHeader.TextWrapping='Wrap'
     [void]$dStoreList.Children.Add($storeHeader)
 
     $script:DebloatChecks = @()
     $installed = @()
-    try { $installed = @(Get-AppxPackage -PackageTypeFilter Main -ErrorAction SilentlyContinue | Sort-Object Name -Unique) } catch { }
+    try { $installed = @(Get-AppxPackage -PackageTypeFilter Main -ErrorAction Stop | Sort-Object Name -Unique) } catch { Write-Log ('Store app list: Get-AppxPackage failed ({0}); reading installed apps from the package registry instead.' -f $_.Exception.Message) 'Warn' }
+    if (-not $installed.Count) {
+        $repo = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages'
+        $installed = @(Get-ChildItem -LiteralPath $repo -ErrorAction SilentlyContinue | ForEach-Object {
+            $parts = $_.PSChildName -split '_'
+            if ($parts.Count -ge 5 -and $parts[3] -eq '') { [pscustomobject]@{ Name=$parts[0]; PackageFamilyName=($parts[0] + '_' + $parts[-1]); PackageFullName=$_.PSChildName; Publisher=$(if ($parts[0] -match '^(Microsoft|MicrosoftWindows|MicrosoftCorporationII|Clipchamp)\.') { 'CN=Microsoft Corporation' } else { '' }); SignatureKind='Store'; NonRemovable=$false } }
+        } | Sort-Object Name -Unique)
+        Write-Log ('Store app list read {0} installed app(s) from the package registry.' -f $installed.Count) 'Info'
+    }
     $startNamesByFamily = @{}
     try {
         foreach($startApp in @(Get-StartApps -ErrorAction SilentlyContinue)) {
@@ -7694,6 +7805,7 @@ function Invoke-DebloatApply {
     if (-not $toRemove.Count) { return }
     if(-not $RestoreHandled){$rp=[System.Windows.MessageBox]::Show('Create a Windows restore point before removing these apps?','Debloat','YesNoCancel','Question'); if($rp -eq 'Cancel'){return}; if($rp -eq 'Yes'){New-RestorePoint|Out-Null}}
     foreach ($a in $toRemove) { try {
+        Update-UiNow ('Removing {0}...' -f $a.Label)
         $verb = if ($a.Kind -eq 'program') { 'Uninstalling program' } else { 'Uninstalling Store app' }
         Write-Log ("{0}: {1}..." -f $verb,$a.Label) 'Action'
         if($a.Kind -eq 'appx'){ Invoke-Action @{kind='appx';name=$a.Name;AllowUnsupportedStoreRemoval=[bool]$a.AllowUnsupportedStoreRemoval;provisioned=[bool]$chkProvisioned.IsChecked} }
