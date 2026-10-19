@@ -109,7 +109,7 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 - **Multithreaded Rendering:** ON.
 - **Material / Texture / Detail / UI quality:** Low. Valorant is CPU-bound, and these barely cost FPS but add clutter.
 - **Vignette, Improve Clarity, Experimental Sharpening, Bloom, Distortion, Cast Shadows:** OFF.
-- **Anti-Aliasing:** MSAA 2x (or None). **Anisotropic Filtering:** 4x.
+- **Anti-Aliasing:** None for the highest FPS (what the Games tab competitive values pick), or MSAA 2x if jagged edges bother you; it costs a little FPS. **Anisotropic Filtering:** 1x to 4x; 4x is sharper at almost no cost on modern GPUs.
 - **VSync:** OFF.
 - **Raw Input Buffer:** nothing to set. Since patch 11.06 it is always on and the toggle is gone.
 - **Settings > General > Network Buffering:** Minimum. Raise it only if enemies teleport on a bad connection.
