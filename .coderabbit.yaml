@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+tone_instructions: "Be direct and specific. Point to the exact line, explain the bug and how it fails, and suggest a fix that works in Windows PowerShell 5.1."
+early_access: false
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  path_filters:
+    - "!docs/screenshots/**"
+    - "!**/*.png"
+  path_instructions:
+    - path: "**/*.ps1"
+      instructions: |
+        Rion Tool is a single-file Windows PowerShell 5.1 WPF app (Windows 10/11, run as administrator).
+        Review for real bugs first:
+        - Syntax or cmdlets that do not exist in Windows PowerShell 5.1 (ternary ?:, ??, ?., && and ||, ForEach-Object -Parallel, ConvertFrom-Json -AsHashtable, Get-Content -AsByteStream).
+        - PowerShell variable names are case-insensitive. Flag any script-level variable that shares a name with a $script: variable used elsewhere (for example $rows vs $script:Rows), because it silently overwrites it.
+        - Null handling, missing -ErrorAction on calls that can throw, wrong registry paths, service names or value types, and off-by-one or wrong-scope bugs.
+        - Code that runs inside runspaces (Get-TweakDetection and its helpers) only sees functions listed in $fnNames.
+        - WPF event handlers run on the UI thread; flag blocking work or UI access from background runspaces.
+        - Every tweak must be reversible: an Apply action needs a Revert action or a journaled original value.
+        - INI edits for game configs must keep other lines, sections and line endings untouched.
+        Project rules, do not flag these as problems:
+        - The script intentionally has no code comments and only ASCII characters.
+        - Function names such as Apply-Detection or Load-GameState use unapproved verbs on purpose.
+        - Write-Host and positional parameters are allowed.
+    - path: "**/*.md"
+      instructions: |
+        Check that the documentation matches what RionTool.ps1 actually does, and flag broken links, wrong paths or wrong setting names. Keep the wording short and plain.
+    - path: "**/*.bat"
+      instructions: |
+        Launcher for RionTool.ps1. Check that it works from any folder and with paths that contain spaces.
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    base_branches:
+      - "^main$"
+      - "^review-base$"
+  tools:
+    psscriptanalyzer:
+      enabled: true
+    markdownlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    yamllint:
+      enabled: true
+chat:
+  auto_reply: true
+knowledge_base:
+  opt_out: false
