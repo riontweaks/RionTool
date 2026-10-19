@@ -4221,16 +4221,44 @@ $script:ReinstallCatalog = @($script:MicrosoftAppCatalog) + @(
 )
 $script:ReinstallChecks = @()
 
+function Save-RionDownload {
+    param([string]$Url,[string]$Path,[string]$Label)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $req = [Net.HttpWebRequest]::Create($Url)
+    $req.UserAgent = 'RionTool'; $req.Timeout = 30000; $req.ReadWriteTimeout = 60000; $req.AllowAutoRedirect = $true
+    $resp = $req.GetResponse()
+    try {
+        $total = [long]$resp.ContentLength
+        $in = $resp.GetResponseStream(); $out = [IO.File]::Create($Path)
+        try {
+            $buf = New-Object byte[] 1048576; $done = 0L; $lastPct = -1; $lastMb = -1; $sw = [Diagnostics.Stopwatch]::StartNew()
+            while (($n = $in.Read($buf,0,$buf.Length)) -gt 0) {
+                $out.Write($buf,0,$n); $done += $n
+                $speed = ($done / 1MB) / [Math]::Max($sw.Elapsed.TotalSeconds,0.1)
+                if ($total -gt 0) {
+                    $pct = [int](100 * $done / $total)
+                    if ($pct -ne $lastPct) { $lastPct = $pct; try { [Console]::Write(("`r    {0}: {1,3}%  ({2:N1} of {3:N1} MB, {4:N1} MB/s)   " -f $Label,$pct,($done/1MB),($total/1MB),$speed)) } catch { } }
+                } elseif ([int]($done / 5MB) -ne $lastMb) { $lastMb = [int]($done / 5MB); try { [Console]::Write(("`r    {0}: {1:N1} MB ({2:N1} MB/s)   " -f $Label,($done/1MB),$speed)) } catch { } }
+            }
+            try { [Console]::WriteLine() } catch { }
+        } finally { $out.Dispose(); $in.Dispose() }
+    } finally { $resp.Close() }
+    Write-Log ('{0} downloaded ({1:N1} MB).' -f $Label,((Get-Item -LiteralPath $Path).Length / 1MB)) 'Info'
+}
+function Test-WingetExe {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    try { $v = & $Path --version 2>$null; return ($LASTEXITCODE -eq 0 -and [string]$v -match '\d') } catch { return $false }
+}
 function Get-RionWingetPath {
-    $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cmd -and $cmd.Source -and (Test-Path $cmd.Source)) { return $cmd.Source }
-    $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
-    if (Test-Path $alias) { return $alias }
-    $installer = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if ($installer -and $installer.InstallLocation) {
-        $exe = Join-Path $installer.InstallLocation 'winget.exe'
-        if (Test-Path $exe) { return $exe }
-    }
+    $ProgressPreference = 'SilentlyContinue'
+    $candidates = @()
+    $candidates += @(Get-Command winget.exe -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe')
+    try { $candidates += @(& where.exe winget 2>$null) } catch { }
+    foreach ($inst in @(@(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) + @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) | Where-Object { $_.InstallLocation } | Sort-Object Version -Descending)) { $candidates += (Join-Path $inst.InstallLocation 'winget.exe') }
+    foreach ($c in @($candidates | Where-Object { $_ } | Select-Object -Unique)) { if (Test-WingetExe $c) { return $c } }
+    Write-Log ('WinGet did not answer at: {0}' -f ((@($candidates | Where-Object { $_ } | Select-Object -Unique)) -join '; ')) 'Info'
     try {
         Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop
         $installer = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) | Select-Object -First 1
@@ -4238,16 +4266,17 @@ function Get-RionWingetPath {
     } catch { }
     $bundle = Join-Path $env:TEMP ("RionTool-AppInstaller-{0}.msixbundle" -f [guid]::NewGuid().ToString('N'))
     try {
-        Write-Log 'WinGet is missing; downloading Microsoft App Installer from aka.ms/getwinget...' 'Action'
+        Write-Log 'WinGet is missing; downloading Microsoft App Installer from aka.ms/getwinget (about 120 MB). Progress shows in this window.' 'Action'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://aka.ms/getwinget' -OutFile $bundle -UseBasicParsing -TimeoutSec 180
+        Save-RionDownload -Url 'https://aka.ms/getwinget' -Path $bundle -Label 'Microsoft App Installer'
+        Write-Log 'Installing Microsoft App Installer (about a minute)...' 'Action'
         try { Add-AppxPackage -Path $bundle -ErrorAction Stop }
         catch {
             Write-Log ('App Installer needs its runtime packages first ({0}); adding them.' -f $_.Exception.Message) 'Action'
             $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
             foreach ($dep in @(("https://aka.ms/Microsoft.VCLibs.{0}.14.00.Desktop.appx" -f $arch),("https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.8.6/Microsoft.UI.Xaml.2.8.{0}.appx" -f $arch))) {
                 $depFile = Join-Path $env:TEMP ("RionTool-dep-{0}.appx" -f [guid]::NewGuid().ToString('N'))
-                try { Invoke-WebRequest -Uri $dep -OutFile $depFile -UseBasicParsing -TimeoutSec 180; Add-AppxPackage -Path $depFile -ErrorAction Stop } catch { Write-Log ('Runtime package {0}: {1}' -f $dep,$_.Exception.Message) 'Info' } finally { Remove-Item -LiteralPath $depFile -Force -ErrorAction SilentlyContinue }
+                try { Save-RionDownload -Url $dep -Path $depFile -Label (Split-Path $dep -Leaf); Add-AppxPackage -Path $depFile -ErrorAction Stop } catch { Write-Log ('Runtime package {0}: {1}' -f $dep,$_.Exception.Message) 'Info' } finally { Remove-Item -LiteralPath $depFile -Force -ErrorAction SilentlyContinue }
             }
             Add-AppxPackage -Path $bundle -ErrorAction Stop
         }
