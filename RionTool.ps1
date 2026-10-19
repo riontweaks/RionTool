@@ -44,6 +44,8 @@ $script:Build     = '2026-10-19.2'
 $script:DataDir   = Join-Path $env:ProgramData 'RionTool'
 $script:LogPath   = Join-Path $script:DataDir 'rion.log'
 $script:BackupDir = Join-Path $script:DataDir 'backups'
+$script:InstanceMutex = New-Object System.Threading.Mutex($false,'Local\RionToolSingleInstance')
+if (-not $script:InstanceMutex.WaitOne(0)) { [System.Windows.MessageBox]::Show('Rion Tool is already open. Use the window that is already running, so two copies do not overwrite each other''s undo records.','Rion Tool','OK','Information') | Out-Null; return }
 if (-not (Test-Path $script:BackupDir)) { New-Item -ItemType Directory -Path $script:BackupDir -Force | Out-Null }
  
 $script:Env = [ordered]@{
@@ -120,14 +122,17 @@ function Invoke-RetiredTweakCleanup {
             $changed = $true
         }
     }
-    if ($changed) { Save-Journal }
+    if ($changed) { [void](Save-Journal) }
 }
 
 function Save-Journal {
     try {
         if (-not (Test-Path -LiteralPath $script:DataDir)) { New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null }
-        $script:Journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:JournalPath -Encoding UTF8
-    } catch { Write-Log ("Could not save original values: {0}" -f $_.Exception.Message) 'Warn' }
+        $tmp = $script:JournalPath + '.tmp'
+        $script:Journal | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmp -Destination $script:JournalPath -Force -ErrorAction Stop
+        return $true
+    } catch { Write-Log ("Could not save original values: {0}" -f $_.Exception.Message) 'Warn'; return $false }
 }
 function Get-RecordKey { param($Record) return ("{0}|{1}|{2}" -f $Record.kind,$Record.path,$Record.name) }
 function Get-RegValueRecord {
@@ -918,11 +923,11 @@ function Save-OriginalRecords {
             }
         }
     }
-    if ($changed) { Save-Journal }
+    if ($changed -and -not (Save-Journal)) { throw 'The original values could not be saved, so this setting was not changed (it could not be undone otherwise).' }
 }
 function Clear-Journal {
     param([string]$Id)
-    if ($script:Journal.ContainsKey($Id)) { [void]$script:Journal.Remove($Id); Save-Journal }
+    if ($script:Journal.ContainsKey($Id)) { [void]$script:Journal.Remove($Id); [void](Save-Journal) }
 }
 function Restore-OriginalRecord {
     param($Record)
@@ -3210,7 +3215,7 @@ function Invoke-Action {
                 }
             }
             if ($failed.Count) {
-                $script:Journal[$Action.id] = @($failed); Save-Journal
+                $script:Journal[$Action.id] = @($failed); [void](Save-Journal)
                 throw ("{0} original value(s) could not be restored and were kept for another try." -f $failed.Count)
             }
             Clear-Journal $Action.id
