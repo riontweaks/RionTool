@@ -92,15 +92,7 @@ Add `-Cleanup` to run the recommended cleanup without opening the window. It sti
 
 This tool changes system settings. Cleanup permanently deletes files. Removed apps may need reinstallation, and drive decryption must be reversed manually with a recovery-key plan. Some older undo records lack enough information for automatic restoration. You use the tool at your own risk. Create a restore point before large changes.
 
-## Development checks
 
-Run the isolated regression checks from the repository folder:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Regression.Tests.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Integration.Tests.ps1
-```
-
-Startup shares service, task, adapter and power snapshots across detection workers instead of scanning those sources four times. Health scans run in the background.
 
 The checks parse the application and use mocked Windows operations and temporary game files. They do not launch the app or change system settings. WPF and native Windows behavior still need verification on Windows.
