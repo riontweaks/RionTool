@@ -1,4 +1,4 @@
-# Rion Tool
+﻿# Rion Tool
 
 A Windows tweak utility for gaming PCs. It is a single PowerShell script with a WPF interface. It reads how your PC is set up, explains what each change does and what it can break, and saves original values for reversible settings.
 
@@ -30,7 +30,7 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 - AMD tab: the AMD Software settings, read live from the driver. Radeon Anti-Lag, Chill, Boost, Image Sharpening, Enhanced Sync, VSync, frame rate target, anti-aliasing, anisotropic filtering, tessellation, FreeSync, VSR, GPU scaling, color depth, pixel format, GPU clocks, voltage, VRAM clock and timing, power and TDC limit, Smart Access Memory, Zero RPM and fan curve. Live GPU clocks, temperatures, board power and fan RPM. GPU and fan tuning changes undo themselves after 15 seconds unless you keep them.
 - NVIDIA tab: the main NVIDIA Control Panel 3D settings (Low Latency Mode, power management, texture filtering, VSync, max frame rate, shader cache and more) written straight to the driver's global profile.
 - Network adapter settings match the driver you have: Intel, Realtek, Killer, Qualcomm, MediaTek and Broadcom Ethernet and Wi-Fi.
-- Power plan editor with hidden settings and a Rion plan based on Ultimate Performance (High performance or the active plan if unavailable). Its AC and battery idle timers keep the display and PC awake.
+- Power plan editor with hidden settings and a Rion plan. On desktops it copies Ultimate Performance (High performance or the active plan if unavailable); on Ryzen X3D, Intel hybrid and laptop CPUs it copies Balanced so core parking keeps working. Display and sleep timers are set to Never when plugged in; battery timers are kept.
 
 **Game settings editor**
 - Valorant and Fortnite settings in plain dropdowns: resolution, window mode, FPS caps, NVIDIA Reflex, AMD Anti-Lag 2, quality levels and more.
@@ -84,7 +84,7 @@ Add `-Cleanup` to run the recommended cleanup without opening the window. It sti
 - Download [NVIDIA Profile Inspector 3.0.1.14 or newer](https://github.com/Orbmu2k/nvidiaProfileInspector/releases) and extract it beside `RionTool.ps1`. It is not bundled. Import stops if the backup export fails. Generated profiles go under `C:\ProgramData\RionTool\nvidia`; repository originals are kept intact.
 - Home > Shortcuts and automation opens the bundled Microsoft Sysinternals `Autoruns.exe` after Windows validates its Microsoft signature.
 - Fixes > Gaming and anti-cheat > **Repair Xbox app and services (Microsoft Gaming Repair Tool + reinstall)** runs the bundled Microsoft-signed `GamingRepairTool.exe`, then repairs/reinstalls Xbox, Game Bar, Gaming Services and Xbox Identity Provider. If the executable is absent, untrusted or fails, package repair still runs. WinGet and internet access are needed for package downloads.
-- Install or reapply **Rion's power plan** in the Power tab to update an existing copy. New copies use Ultimate Performance, falling back to High performance or the active plan when Windows does not expose those templates. Reapplying preserves every processor setting in an existing Rion plan. Display (including lock screen), sleep, hibernate and unattended sleep idle timers are set to Never on AC and battery where Windows exposes them. Manual sleep, lid/power buttons, critical-battery protection, managed policy and screen savers remain separate. Keeping a laptop awake drains its battery; measured performance depends on the hardware.
+- Install or reapply **Rion's power plan** in the Power tab to update an existing copy. New copies use Ultimate Performance, falling back to High performance or the active plan when Windows does not expose those templates. Reapplying preserves every processor setting in an existing Rion plan. New copies use Balanced instead on Ryzen X3D, Intel hybrid and laptop CPUs. Display (including lock screen), sleep, hibernate and unattended sleep idle timers are set to Never when plugged in where Windows exposes them; on PCs with a battery the battery timers are left as they were. Manual sleep, lid/power buttons, critical-battery protection, managed policy and screen savers remain separate. Measured performance depends on the hardware.
 
 ## Screenshots
 
