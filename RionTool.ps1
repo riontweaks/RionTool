@@ -51,8 +51,72 @@ $script:LogPath   = Join-Path $script:DataDir 'rion.log'
 $script:BackupDir = Join-Path $script:DataDir 'backups'
 $script:InstanceMutex = New-Object System.Threading.Mutex($false,'Local\RionToolSingleInstance')
 if (-not $script:InstanceMutex.WaitOne(0)) { [System.Windows.MessageBox]::Show('Rion Tool is already open. Use the window that is already running, so two copies do not overwrite each other''s undo records.','Rion Tool','OK','Information') | Out-Null; return }
+$script:TrustedOwnerSids = @('S-1-5-32-544','S-1-5-18','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464',[Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+$script:DataDirNotes = New-Object System.Collections.ArrayList
+function Test-TrustedOwner {
+    param([string]$Path)
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        $sid = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        return ($script:TrustedOwnerSids -contains $sid)
+    } catch { return $false }
+}
+function Remove-UntrustedDataItem {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        if ($item.PSIsContainer) { [IO.Directory]::Delete($item.FullName,$false) } else { [IO.File]::Delete($item.FullName) }
+        [void]$script:DataDirNotes.Add(('Removed a link that pointed out of the Rion Tool data folder: {0}' -f $item.FullName))
+        return
+    }
+    $aside = $item.FullName + '.untrusted-' + [guid]::NewGuid().ToString('N')
+    Move-Item -LiteralPath $item.FullName -Destination $aside -Force -ErrorAction Stop
+    $acl = Get-Acl -LiteralPath $aside
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))
+    $acl.SetAccessRuleProtection($false,$false)
+    foreach ($rule in @($acl.GetAccessRules($true,$false,[Security.Principal.SecurityIdentifier]))) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+    Set-Acl -LiteralPath $aside -AclObject $acl
+    [void]$script:DataDirNotes.Add(('Set aside a file that was not created by an administrator, so Rion Tool never reads it: {0}' -f $aside))
+}
+function Protect-RionDataDir {
+    try {
+        $adminSid = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+        if ((Test-Path -LiteralPath $script:DataDir) -and -not (Test-TrustedOwner $script:DataDir)) {
+            $item = Get-Item -LiteralPath $script:DataDir -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($item.FullName,$false) }
+            else { Move-Item -LiteralPath $script:DataDir -Destination ($script:DataDir + '.untrusted-' + [guid]::NewGuid().ToString('N')) -Force -ErrorAction Stop }
+            [void]$script:DataDirNotes.Add('The Rion Tool data folder was not created by an administrator. It was set aside and a new one was made.')
+        }
+        if (-not (Test-Path -LiteralPath $script:DataDir)) { New-Item -ItemType Directory -Path $script:DataDir -Force -ErrorAction Stop | Out-Null }
+        $current = Get-Acl -LiteralPath $script:DataDir
+        $usersWrite = @($current.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' -and @('S-1-5-18','S-1-5-32-544') -notcontains $_.IdentityReference.Value -and ([int]$_.FileSystemRights -band 0xD0116) })
+        if ($current.AreAccessRulesProtected -and $current.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $adminSid.Value -and -not $usersWrite.Count) { return }
+        $acl = New-Object Security.AccessControl.DirectorySecurity
+        $acl.SetOwner($adminSid)
+        $acl.SetAccessRuleProtection($true,$false)
+        $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+        foreach ($pair in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','ReadAndExecute'))) {
+            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $pair[0]),[Security.AccessControl.FileSystemRights]$pair[1],$inherit,'None','Allow')))
+        }
+        Set-Acl -LiteralPath $script:DataDir -AclObject $acl
+        foreach ($child in @(Get-ChildItem -LiteralPath $script:DataDir -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending)) {
+            if ($child.Name -match '\.untrusted-[0-9a-f]{32}$') { continue }
+            if (-not (Test-TrustedOwner $child.FullName)) { try { Remove-UntrustedDataItem $child.FullName } catch { [void]$script:DataDirNotes.Add(('Could not set aside {0}: {1}' -f $child.FullName,$_.Exception.Message)) } }
+        }
+        [void]$script:DataDirNotes.Add('Locked the Rion Tool data folder so only administrators can change it.')
+    } catch { [void]$script:DataDirNotes.Add(('Could not lock the Rion Tool data folder: {0}' -f $_.Exception.Message)) }
+}
+function Test-TrustedDataFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    if (Test-TrustedOwner $Path) { return $true }
+    try { Write-Log ("Ignored {0} because it was not created by an administrator." -f $Path) 'Warn' } catch { }
+    return $false
+}
+Protect-RionDataDir
 if (-not (Test-Path $script:BackupDir)) { New-Item -ItemType Directory -Path $script:BackupDir -Force | Out-Null }
- 
+
 $script:Env = [ordered]@{
     OsName      = 'Windows'
     Build       = 0
@@ -76,7 +140,7 @@ $script:Journal = @{}
 function Read-Journal {
     try {
         $loaded = @{}
-        if (Test-Path -LiteralPath $script:JournalPath -ErrorAction Stop) {
+        if (Test-TrustedDataFile $script:JournalPath) {
             $text = Get-Content -LiteralPath $script:JournalPath -Raw -ErrorAction Stop
             $raw = ConvertFrom-Json -InputObject $text -ErrorAction Stop
             if (-not $text.TrimStart().StartsWith('{') -or $raw -isnot [pscustomobject]) { throw 'The journal must contain a JSON object.' }
@@ -531,6 +595,10 @@ $script:PowerTemplates = [ordered]@{
 }
 $script:RionPlanName = "Rion's power plan"
 $script:RionPlanDescription = 'Performance plan; display, sleep and hibernate idle timers set to Never on AC and battery.'
+$script:RionPlanDescriptionBattery = 'Performance plan; display, sleep and hibernate idle timers set to Never when plugged in. Battery timers are kept.'
+function Get-RionPlanDescription { if (Test-HasBattery) { return $script:RionPlanDescriptionBattery }; return $script:RionPlanDescription }
+function Test-HasBattery { if ($null -eq $script:HasBatteryCache) { try { $script:HasBatteryCache = [bool](@(Get-CimInstance -ClassName Win32_Battery -ErrorAction Stop).Count) } catch { $script:HasBatteryCache = [bool]$script:Env.IsLaptop } }; return $script:HasBatteryCache }
+function Test-NeedsCoreParking { return [bool]($script:Env.CpuX3D -or $script:Env.CpuHybrid -or $script:Env.IsLaptop) }
 
 function Initialize-PowerApi {
     if ($script:PowerApiReady) { return $true }
@@ -564,7 +632,7 @@ function ConvertTo-PowerUInt {
 function Read-PowerJournal {
     try {
         $loaded = @{}
-        if (Test-Path -LiteralPath $script:PowerJournalPath -ErrorAction Stop) {
+        if (Test-TrustedDataFile $script:PowerJournalPath) {
             $text = Get-Content -LiteralPath $script:PowerJournalPath -Raw -ErrorAction Stop
             $raw = ConvertFrom-Json -InputObject $text -ErrorAction Stop
             if (-not $text.TrimStart().StartsWith('{') -or $raw -isnot [pscustomobject]) { throw 'The power journal must contain a JSON object.' }
@@ -634,6 +702,7 @@ function Set-ActivePowerPlan {
 
 function Set-RionPowerPlanPolicy {
     param([string]$Plan)
+    $battery = Test-HasBattery
     $timers = @(
         @{ Sub='7516b95f-f776-4464-8c53-06167f40cc99'; Setting='3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e'; Name='Display idle'; Required=$true },
         @{ Sub='7516b95f-f776-4464-8c53-06167f40cc99'; Setting='8ec4b3a5-6868-48c2-be75-4f3044be88a7'; Name='Locked display idle'; Required=$false },
@@ -647,10 +716,12 @@ function Set-RionPowerPlanPolicy {
             if ($timerSetting.Required) { throw ("Windows does not expose the {0} timer on this PC." -f $timerSetting.Name) }
             continue
         }
-        $errorText = Set-PowerSettingValue -Plan $Plan -Sub $timerSetting.Sub -Setting $timerSetting.Setting -Ac 0 -Dc 0
+        $dc = if ($battery) { [long]$values[1] } else { 0 }
+        $errorText = Set-PowerSettingValue -Plan $Plan -Sub $timerSetting.Sub -Setting $timerSetting.Setting -Ac 0 -Dc $dc
         if ($errorText) { throw ("{0}: {1}" -f $timerSetting.Name,$errorText) }
     }
-    Write-Log 'Rion plan: display, sleep and hibernate idle timers are Never on AC and battery. Processor settings are preserved.' 'Success'
+    if ($battery) { Write-Log 'Rion plan: display, sleep and hibernate idle timers are Never when plugged in. Battery timers were kept so the laptop still sleeps on battery. Processor settings are preserved.' 'Success' }
+    else { Write-Log 'Rion plan: display, sleep and hibernate idle timers are Never on AC and battery. Processor settings are preserved.' 'Success' }
 }
 
 function Install-RionPowerPlan {
@@ -658,11 +729,13 @@ function Install-RionPowerPlan {
     $plan = Find-PowerPlan $script:RionPlanName
     $guid = if ($plan) { [string]$plan.Guid } else { $null }
     if ($guid) {
-        if ([string]$plan.Description -cne $script:RionPlanDescription) { Set-PowerPlanText -Guid $guid -Name $script:RionPlanName -Description $script:RionPlanDescription -NoJournal }
+        $desc = Get-RionPlanDescription
+        if ([string]$plan.Description -cne $desc) { Set-PowerPlanText -Guid $guid -Name $script:RionPlanName -Description $desc -NoJournal }
     } else {
-        $sources = @($script:PowerTemplates['Ultimate Performance'],$script:PowerTemplates['High performance'],[RionPowrProf]::ActiveScheme()) | Where-Object { $_ } | Select-Object -Unique
+        $sources = if (Test-NeedsCoreParking) { @($script:PowerTemplates['Balanced'],[RionPowrProf]::ActiveScheme()) } else { @($script:PowerTemplates['Ultimate Performance'],$script:PowerTemplates['High performance'],[RionPowrProf]::ActiveScheme()) }
+        $sources = @($sources | Where-Object { $_ } | Select-Object -Unique)
         foreach ($src in $sources) {
-            $guid = Copy-PowerPlan -SourceGuid $src -Name $script:RionPlanName -Description $script:RionPlanDescription
+            $guid = Copy-PowerPlan -SourceGuid $src -Name $script:RionPlanName -Description (Get-RionPlanDescription)
             if ($guid) {
                 Write-Log ("Rion's power plan was copied from '{0}'." -f [RionPowrProf]::Name($src,$null,$null)) 'Info'
                 break
@@ -1920,7 +1993,7 @@ $script:Tweaks += (New-Tweak -Id 'pwr.pcie.aspm' -Tab 'Advanced' -SubTab '' -Gro
 $script:Tweaks += (New-Tweak -Id 'pwr.usb.suspend' -Tab 'Advanced' -SubTab '' -Group 'Power and adapters' -Label 'Turn off USB selective suspend' -Risk 'Moderate' -Detect @{kind='powerSettingPresent';sub='2a737441-1930-4402-8d77-b2bebba308a3';setting='48e6b7a6-50f5-4782-a5d4-53bb8f07e226'} -Apply @(@{kind='powerSetting';sub='2a737441-1930-4402-8d77-b2bebba308a3';setting='48e6b7a6-50f5-4782-a5d4-53bb8f07e226';value=0;label='USB selective suspend'}) -Revert @(@{kind='powerSetting';sub='2a737441-1930-4402-8d77-b2bebba308a3';setting='48e6b7a6-50f5-4782-a5d4-53bb8f07e226';value='Default';label='USB selective suspend'}) -Info 'Stops Windows from suspending idle USB devices in the active power plan, which avoids wake-up delays and dropouts on mice, audio interfaces and controllers. Laptops use a little more battery. Unticking restores the previous values, or the plan default.')
 $script:Tweaks += (New-Tweak -Id 'gpu.intel.todo' -Tab 'GPU' -SubTab '' -Group 'Intel' -Label 'Disable Intel Graphics Software at sign-in' -Risk 'Safe' -Detect @{kind='runkey';name='IntelGraphicsSoftware'} -Apply @(@{kind='runkey';name='IntelGraphicsSoftware';remove=$true}) -Revert @() -Info 'Removes Intel Graphics Software from startup. The driver still loads; only the tray companion is stopped.')
  
-$script:Tweaks += (New-Tweak -Id 'cpu.plan' -Tab 'CPU' -SubTab '' -Group 'Power' -Label 'Power plan' -Risk 'Safe' -Type 'dropdown' -Options @('Default','Balanced','High performance','Ultimate Performance',"Rion's power plan") -Detect $null -Info 'Selects the active Windows power plan. Balanced with Windows Power mode set to Best performance is the best general choice; AMD Ryzen X3D and Intel hybrid CPUs rely on Balanced for core parking and scheduling. Ultimate Performance keeps cores from idling, raises idle power and gives no measurable gain; avoid it on laptops. Rion''s power plan creates a copy of Ultimate Performance named "Rion''s power plan".')
+$script:Tweaks += (New-Tweak -Id 'cpu.plan' -Tab 'CPU' -SubTab '' -Group 'Power' -Label 'Power plan' -Risk 'Safe' -Type 'dropdown' -Options @('Default','Balanced','High performance','Ultimate Performance',"Rion's power plan") -Detect $null -Info 'Selects the active Windows power plan. Balanced with Windows Power mode set to Best performance is the best general choice; AMD Ryzen X3D and Intel hybrid CPUs rely on Balanced for core parking and scheduling. Ultimate Performance keeps cores from idling, raises idle power and gives no measurable gain; avoid it on laptops. Rion''s power plan copies Ultimate Performance on desktops, or Balanced on X3D, Intel hybrid and laptop CPUs so core parking keeps working, and sets the screen, sleep and hibernate timers to Never (only when plugged in on a laptop).')
 $script:Tweaks += (New-Tweak -Id 'cpu.parking' -Tab 'CPU' -SubTab '' -Group 'Scheduling' -Label 'Disable CPU core parking' -Risk 'Moderate' -Detect @{kind='coreParkingAllowed'} -Apply @(@{kind='coreparking';park=$false}) -Revert @(@{kind='coreparking';park=$true}) -Info 'Core parking powers down idle cores. Disabling keeps all cores available, which can help bursty workloads on a desktop with one type of core, but raises idle power. Not offered on laptops, Ryzen X3D (parking steers games onto the 3D V-Cache die) or Intel hybrid CPUs such as 12th-14th gen and Core Ultra (parking and Thread Director keep games on the P-cores). Applied to the active power plan.')
 $script:Tweaks += (New-Tweak -Id 'cpu.boost' -Tab 'CPU' -SubTab '' -Group 'Power' -Label 'Processor boost mode' -Risk 'Moderate' -Type 'dropdown' -Options @('Default','Enabled','Aggressive','Disabled') -Detect $null -Info 'Configures the active power plan CPU boost policy with powercfg PERFBOOSTMODE. Aggressive can increase heat and power use; Disabled reduces peak performance. Default leaves policy unchanged.' )
  
@@ -3461,14 +3534,14 @@ function Invoke-Action {
                 try {
                     if ($Action.enable) { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null }
                     else                { Disable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null }
-                } catch { }
+                } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
             }
         }
         'task' {
             try {
                 if ($Action.enable) { Enable-ScheduledTask -TaskPath $Action.path -TaskName $Action.name -ErrorAction Stop | Out-Null }
                 else                { Disable-ScheduledTask -TaskPath $Action.path -TaskName $Action.name -ErrorAction Stop | Out-Null }
-            } catch { }
+            } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
         }
         'taskNamePattern' {
             $tasks=Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $taskName=$_.TaskName; $Action.patterns | Where-Object { $taskName -like $_ } }
@@ -3528,7 +3601,7 @@ function Invoke-Action {
                 try {
                     if ($Action.enable) { Enable-NetAdapter -Name $ad.Name -Confirm:$false -ErrorAction SilentlyContinue }
                     else                { Disable-NetAdapter -Name $ad.Name -Confirm:$false -ErrorAction SilentlyContinue }
-                } catch { }
+                } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
             }
         }
         'nagle' {
@@ -3538,7 +3611,7 @@ function Invoke-Action {
                 else { Remove-RegValue -Path $_.PSPath -Name 'TcpAckFrequency'; Remove-RegValue -Path $_.PSPath -Name 'TCPNoDelay' }
             }
         }
-        'netRss' { Get-NetAdapterRss -ErrorAction SilentlyContinue | ForEach-Object { try { Set-NetAdapterRss -Name $_.Name -Enabled ([bool]$Action.enable) -ErrorAction Stop } catch { } } }
+        'netRss' { Get-NetAdapterRss -ErrorAction SilentlyContinue | ForEach-Object { try { Set-NetAdapterRss -Name $_.Name -Enabled ([bool]$Action.enable) -ErrorAction Stop } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
         'netRsc' { Get-NetAdapterRsc -ErrorAction SilentlyContinue | ForEach-Object { try { Set-NetAdapterRsc -Name $_.Name -IPv4Enabled ([bool]$Action.enable) -IPv6Enabled ([bool]$Action.enable) -ErrorAction Stop } catch { } } }
         'netRssProfile' { Get-NetAdapterRss -ErrorAction SilentlyContinue | ForEach-Object { try { Set-NetAdapterRss -Name $_.Name -Profile ([string]$Action.profile) -BaseProcessorNumber ([byte]$Action.base) -NumberOfReceiveQueues ([uint32]$Action.queues) -ErrorAction Stop } catch { Write-Log ("Adapter {0} rejected the requested RSS layout: {1}" -f $_.Name,$_.Exception.Message) 'Warn' } } }
         'netAdvancedProperty' {
@@ -3566,7 +3639,7 @@ function Invoke-Action {
                 catch { Write-Log ("Could not set {0} to its advertised maximum on {1}." -f $property.DisplayName,$property.Name) 'Warn' }
             }
         }
-        'netPower' { $mode=[string]$Action.value; Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { try { Set-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket $mode -WakeOnPattern $mode -ErrorAction Stop } catch { } } }
+        'netPower' { $mode=[string]$Action.value; Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { try { Set-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket $mode -WakeOnPattern $mode -ErrorAction Stop } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
         'netbios' { $value=[uint32]$Action.value; Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = True' -ErrorAction SilentlyContinue | ForEach-Object { try { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{TcpipNetbiosOptions=$value} -ErrorAction Stop | Out-Null } catch { Write-Log ("Could not change NetBIOS on adapter {0}." -f $_.Description) 'Warn' } } }
         'dnsDoh' {
             if ($Action.value -eq 'Default') { Invoke-Action @{kind='setDns';servers=$null}; return }
@@ -3592,7 +3665,7 @@ function Invoke-Action {
         'powerValue' { $alias=[string]$Action.alias; $value=[string]$Action.value; if($value -eq 'Default'){ return }; powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $alias $value 2>$null; powercfg -setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $alias $value 2>$null; powercfg -S SCHEME_CURRENT 2>$null }
         'gameMode' { if($Action.value -eq 'Default'){ Remove-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled'; Remove-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' } else { $v=[int]($Action.value -eq 'On'); Set-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled' -Value $v -Type DWord; Set-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' -Value $v -Type DWord } }
         'hardwareGpu' { if($Action.value -eq 'Default'){Remove-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode'}else{$v=[int]$Action.value;Set-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value $v -Type DWord} }
-        'setDns' { Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object { try { if($Action.servers){Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $Action.servers -ErrorAction Stop}else{Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop} } catch{} } }
+        'setDns' { Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object { try { if($Action.servers){Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $Action.servers -ErrorAction Stop}else{Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop} } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
         'setCoreParking' { if($Action.park -eq 'Default'){return}; $min=if([bool]$Action.park){0}else{100}; powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES $min 2>$null; powercfg -setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES $min 2>$null; powercfg -S SCHEME_CURRENT 2>$null }
         'amdUlps' {
             foreach ($k in @(Get-AmdDisplayKeys)) { Set-RegValue -Path $k -Name 'EnableUlps' -Value ([int][bool]$Action.enable) -Type DWord }
@@ -3620,7 +3693,7 @@ function Invoke-Action {
         'usbPower' {
             $want = [bool]$Action.enable
             $done = $false
-            try { Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop | ForEach-Object { try { Set-CimInstance -InputObject $_ -Property @{ Enable = $want } -ErrorAction Stop; $done = $true } catch {} } } catch {}
+            try { Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop | ForEach-Object { try { Set-CimInstance -InputObject $_ -Property @{ Enable = $want } -ErrorAction Stop; $done = $true } catch { } } } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
             if (-not $done) { Get-WmiObject -Namespace 'root\wmi' -Class MSPower_DeviceEnable -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Enable = $want; [void]$_.Put() } catch {} } }
         }
         'hostsBlock' {
@@ -3639,8 +3712,8 @@ function Invoke-Action {
             $group = 'RionTool Telemetry Block'
             Get-NetFirewallRule -Group $group -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
             if ($Action.enable) {
-                foreach ($svc in @($Action.services)) { try { New-NetFirewallRule -DisplayName ("Block {0} telemetry" -f $svc) -Group $group -Direction Outbound -Action Block -Service $svc -ErrorAction Stop | Out-Null } catch {} }
-                foreach ($prog in @($Action.programs)) { if (Test-Path -LiteralPath $prog) { try { New-NetFirewallRule -DisplayName ("Block {0} telemetry" -f (Split-Path $prog -Leaf)) -Group $group -Direction Outbound -Action Block -Program $prog -ErrorAction Stop | Out-Null } catch {} } }
+                foreach ($svc in @($Action.services)) { try { New-NetFirewallRule -DisplayName ("Block {0} telemetry" -f $svc) -Group $group -Direction Outbound -Action Block -Service $svc -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
+                foreach ($prog in @($Action.programs)) { if (Test-Path -LiteralPath $prog) { try { New-NetFirewallRule -DisplayName ("Block {0} telemetry" -f (Split-Path $prog -Leaf)) -Group $group -Direction Outbound -Action Block -Program $prog -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
             }
         }
         'classicMenu' {
@@ -3701,7 +3774,7 @@ function Invoke-Action {
                 foreach ($n in 'SpynetReporting','SubmitSamplesConsent') { Remove-RegValue -Path $spynet -Name $n }
                 $refused = @(); foreach ($s in $defSvcStart.Keys) { if (Test-ServiceExists $s) { try { [void](Set-ServiceStart -Name $s -StartType $defSvcStart[$s]) } catch { $refused += $s } } }
                 if ($refused.Count) { Write-Log ("Windows protects {0}, so their start type was left as Windows set it; they return to normal once the Defender policies above are removed and the PC restarts." -f ($refused -join ', ')) 'Info' }
-                Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -like ("{0}*" -f $defTaskPath) } | ForEach-Object { try { Enable-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName -ErrorAction Stop | Out-Null } catch {} }
+                Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -like ("{0}*" -f $defTaskPath) } | ForEach-Object { try { Enable-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
                 Write-Log 'Microsoft Defender services, scheduled tasks and policies restored to their defaults. Restart to apply. If Defender stays off, open Windows Security and turn Tamper Protection back on, then restart.' 'Warn'
             } else {
                 Set-RegValue -Path $defPol -Name 'DisableAntiSpyware' -Value 1 -Type DWord
@@ -3711,14 +3784,14 @@ function Invoke-Action {
                 Set-RegValue -Path $spynet -Name 'SubmitSamplesConsent' -Value 2 -Type DWord
                 $refused = @(); foreach ($s in $defSvcStart.Keys) { if (Test-ServiceExists $s) { try { [void](Set-ServiceStart -Name $s -StartType 'Disabled' -Stop) } catch { $refused += $s } } }
                 if ($refused.Count) { Write-Log ("Windows 11 protects {0} (access denied even for administrators), so those services keep running. The Defender policies were written; they only take effect while Tamper Protection is off. Fully removing Defender services needs Safe Mode or a third-party antivirus, which registers itself and turns Defender off automatically." -f ($refused -join ', ')) 'Warn' }
-                Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -like ("{0}*" -f $defTaskPath) } | ForEach-Object { try { Disable-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName -ErrorAction Stop | Out-Null } catch {} }
+                Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -like ("{0}*" -f $defTaskPath) } | ForEach-Object { try { Disable-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
                 if ($refused.Count) { Write-Log 'Microsoft Defender policies and scheduled tasks are off; protected services were left running. Restart to apply. With Tamper Protection on, Defender ignores these policies.' 'Warn' }
                 else { Write-Log 'Microsoft Defender disabled: real-time protection, scheduled scans, cloud submission, its services and scheduled tasks are off. This needs Tamper Protection turned off first, and leaves the PC without built-in antivirus until you re-enable it. Restart to apply.' 'Warn' }
             }
         }
         'update' {
             $svcs = 'wuauserv','UsoSvc','WaaSMedicSvc'
-            if ($Action.enable) { foreach ($s in $svcs) { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Manual'; try { Start-Service $s -ErrorAction SilentlyContinue } catch{} } } }
+            if ($Action.enable) { foreach ($s in $svcs) { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Manual'; try { Start-Service $s -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } } }
             else { foreach ($s in $svcs) { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Disabled' -Stop } } }
         }
         'updateManual' { foreach ($s in 'wuauserv','UsoSvc','WaaSMedicSvc') { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Manual' } } }
@@ -3895,6 +3968,7 @@ function Invoke-Action {
 </Window>
 '@
  
+foreach ($note in @($script:DataDirNotes)) { Write-Log $note 'Info' }
 Read-Journal
 Read-PowerJournal
 Invoke-RetiredTweakCleanup
@@ -4466,7 +4540,7 @@ function Get-RionWingetPath {
         Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop
         $installer = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue) | Select-Object -First 1
         if ($installer -and $installer.InstallLocation -and (Test-Path (Join-Path $installer.InstallLocation 'winget.exe'))) { Write-Log 'WinGet was registered again from the App Installer already on this PC.' 'Success'; return (Join-Path $installer.InstallLocation 'winget.exe') }
-    } catch { }
+    } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
     $bundle = Join-Path $env:TEMP ("RionTool-AppInstaller-{0}.msixbundle" -f [guid]::NewGuid().ToString('N'))
     try {
         Write-Log 'WinGet is missing; downloading Microsoft App Installer from aka.ms/getwinget (about 120 MB). Progress shows in this window.' 'Action'
@@ -4712,7 +4786,7 @@ function Repair-StartSearch {
     foreach ($pn in 'Microsoft.Windows.StartMenuExperienceHost','MicrosoftWindows.Client.CBS','Microsoft.Windows.ShellExperienceHost') {
         foreach ($pk in @(Get-AppxPackage -AllUsers -Name $pn -ErrorAction SilentlyContinue)) {
             $mf = Join-Path ([string]$pk.InstallLocation) 'AppxManifest.xml'
-            if (Test-Path -LiteralPath $mf) { try { Add-AppxPackage -DisableDevelopmentMode -Register $mf -ErrorAction Stop } catch { } }
+            if (Test-Path -LiteralPath $mf) { try { Add-AppxPackage -DisableDevelopmentMode -Register $mf -ErrorAction Stop } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
         }
     }
     Get-Process SearchHost,SearchApp,StartMenuExperienceHost,TextInputHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -4772,7 +4846,7 @@ function Repair-WindowsUpdate {
     $wu = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
     foreach ($n in 'DisableWindowsUpdateAccess','DoNotConnectToWindowsUpdateInternetLocations','WUServer','WUStatusServer','SetDisableUXWUAccess') { Remove-RegValue -Path $wu -Name $n }
     foreach ($n in 'NoAutoUpdate','UseWUServer') { Remove-RegValue -Path ($wu + '\AU') -Name $n }
-    foreach ($tp in '\Microsoft\Windows\WindowsUpdate\','\Microsoft\Windows\UpdateOrchestrator\') { foreach ($tk in @(Get-ScheduledTask -TaskPath $tp -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Disabled' })) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { } } }
+    foreach ($tp in '\Microsoft\Windows\WindowsUpdate\','\Microsoft\Windows\UpdateOrchestrator\') { foreach ($tk in @(Get-ScheduledTask -TaskPath $tp -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Disabled' })) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
     foreach ($n in 'wuauserv','UsoSvc','BITS') { Start-Service -Name $n -ErrorAction SilentlyContinue }
     Write-Log 'Windows Update is back on: its services, tasks and policies are at the Windows defaults. Your deferral and driver choices are kept.' 'Success'
     Start-Process 'ms-settings:windowsupdate'
@@ -4783,8 +4857,8 @@ function Repair-Defender {
     foreach ($n in 'DisableAntiSpyware','DisableAntiVirus','DisableRoutinelyTakingAction') { Remove-RegValue -Path $wd -Name $n }
     foreach ($n in 'DisableRealtimeMonitoring','DisableBehaviorMonitoring','DisableOnAccessProtection','DisableScanOnRealtimeEnable','DisableIOAVProtection') { Remove-RegValue -Path ($wd + '\Real-Time Protection') -Name $n }
     foreach ($n in 'SpynetReporting','SubmitSamplesConsent','DisableBlockAtFirstSeen') { Remove-RegValue -Path ($wd + '\Spynet') -Name $n }
-    foreach ($tk in @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Disabled' })) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { } }
-    try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop } catch { }
+    foreach ($tk in @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -eq 'Disabled' })) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
+    try { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
     Start-Service -Name 'SecurityHealthService' -ErrorAction SilentlyContinue
     Write-Log 'Microsoft Defender policies were removed and its tasks turned back on. Restart, then check Windows Security; real-time protection comes back on by itself.' 'Success'
     Start-Process 'windowsdefender://threat'
@@ -4969,16 +5043,16 @@ function Repair-SignInServices {
         try { [void](Set-ServiceStart -Name $name -StartType $defaults[$name]); $changed += ('{0} -> {1}' -f $name,$defaults[$name]) }
         catch { Write-Log ("Could not restore {0}: {1}" -f $name,$_.Exception.Message) 'Warn' }
     }
-    try { Start-Service -Name 'CryptSvc' -ErrorAction SilentlyContinue } catch { }
+    try { Start-Service -Name 'CryptSvc' -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
     if ($changed.Count) { Write-Log ('Sign-in and credential services restored to Windows defaults: {0}. Restart, then sign back in to Microsoft apps. Logins that apps already lost are not brought back.' -f ($changed -join ', ')) 'Success' }
     else { Write-Log 'Sign-in and credential services are already at their Windows defaults.' 'Success' }
 }
 
 function Clear-UpdateAndStoreCaches {
-    foreach ($svc in 'wuauserv','bits','DoSvc') { try { Stop-Service $svc -Force -ErrorAction SilentlyContinue } catch {} }
+    foreach ($svc in 'wuauserv','bits','DoSvc') { try { Stop-Service $svc -Force -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
     Get-ChildItem -LiteralPath "$env:SystemRoot\SoftwareDistribution\Download" -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     try { Delete-DeliveryOptimizationCache -Force -ErrorAction SilentlyContinue } catch {}
-    foreach ($svc in 'wuauserv','bits','DoSvc') { try { Start-Service $svc -ErrorAction SilentlyContinue } catch {} }
+    foreach ($svc in 'wuauserv','bits','DoSvc') { try { Start-Service $svc -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
     Start-Process 'wsreset.exe' -ArgumentList '-i' -ErrorAction SilentlyContinue
     Write-Log 'Cleared the Windows Update download cache and Delivery Optimization cache and started a Microsoft Store cache reset. Store app lists refresh on next open.' 'Success'
 }
@@ -5212,14 +5286,30 @@ function Find-NvidiaProfileInspector {
     $best = $found | ForEach-Object {
         $v = [version]'0.0'
         try { $v = [version](($_.VersionInfo.FileVersion -replace '[^\d\.]','').Trim('.')) } catch { }
-        [pscustomobject]@{ Path=$_.FullName; Version=$v }
-    } | Sort-Object Version -Descending | Select-Object -First 1
+        [pscustomobject]@{ Path=$_.FullName; Version=$v; Preferred=[bool]($_.FullName -notlike (Join-Path $env:USERPROFILE '*')) -or ($PSScriptRoot -and $_.FullName -like (Join-Path $PSScriptRoot '*')) }
+    } | Sort-Object Preferred,Version -Descending | Select-Object -First 1
     return $best
+}
+
+function Test-ApprovedProfileInspector {
+    param($Npi)
+    $store = Join-Path $script:DataDir 'npi-approved.json'
+    $hash = (Get-FileHash -LiteralPath $Npi.Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    $approved = @()
+    if (Test-TrustedDataFile $store) { try { $approved = @(Get-Content -LiteralPath $store -Raw -ErrorAction Stop | ConvertFrom-Json | ForEach-Object { $_ }) } catch { $approved = @() } }
+    if (@($approved | Where-Object { [string]$_.Path -eq $Npi.Path -and [string]$_.Sha256 -eq $hash }).Count) { return $true }
+    $sig = Get-AuthenticodeSignature -LiteralPath $Npi.Path -ErrorAction SilentlyContinue
+    $signer = if ($sig -and $sig.Status -eq 'Valid') { $sig.SignerCertificate.Subject } else { 'not signed' }
+    $msg = "Rion Tool will run this program with administrator rights:`r`n`r`n{0}`r`nVersion {1}`r`nSigned by: {2}`r`nSHA-256: {3}`r`n`r`nOnly continue if you downloaded it yourself from the official NVIDIA Profile Inspector GitHub releases page. You are asked again if the file changes.`r`n`r`nUse this file?" -f $Npi.Path,$Npi.Version,$signer,$hash
+    if ([System.Windows.MessageBox]::Show($msg,'Confirm NVIDIA Profile Inspector','YesNo','Warning') -ne 'Yes') { Write-Log ('NVIDIA Profile Inspector at {0} was not approved, so nothing was changed.' -f $Npi.Path) 'Warn'; return $false }
+    $keep = @($approved | Where-Object { [string]$_.Path -ne $Npi.Path }) + @([pscustomobject]@{ Path=$Npi.Path; Sha256=$hash; At=(Get-Date).ToString('o') })
+    try { Write-AtomicJson -Path $store -Value $keep } catch { Write-Log ('Could not remember the approved NVIDIA Profile Inspector: {0}' -f $_.Exception.Message) 'Warn' }
+    return $true
 }
 
 function Get-UsableProfileInspector {
     $npi = Find-NvidiaProfileInspector
-    if ($npi -and $npi.Version -ge $script:NpiMinVersion) { return $npi }
+    if ($npi -and $npi.Version -ge $script:NpiMinVersion) { if (Test-ApprovedProfileInspector $npi) { return $npi }; return $null }
     $why = if ($npi) { "Found NVIDIA Profile Inspector {0} at`r`n{1}`r`nbut version {2} or newer is required: older versions only support Replace imports, which reset the global profile and strip apps from game profiles." -f $npi.Version,$npi.Path,$script:NpiMinVersion } else { 'NVIDIA Profile Inspector was not found next to Rion Tool, in Downloads, on the Desktop or in Program Files.' }
     $msg = "{0}`r`n`r`nRion Tool does not download it. Get the latest release (nvidiaProfileInspector.zip) from GitHub and extract it into the Rion Tool folder:`r`n{1}`r`n`r`nOpen the releases page now?" -f $why,$PSScriptRoot
     if ([System.Windows.MessageBox]::Show($msg,'NVIDIA Profile Inspector needed','YesNo','Information') -eq 'Yes') { Start-Process $script:NpiReleases }
@@ -5372,7 +5462,7 @@ function Invoke-CleanupCategory {
     foreach ($svc in @($Category.Services)) {
         if (-not $svc) { continue }
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
-        if ($s -and $s.Status -eq 'Running') { try { Stop-Service -Name $svc -Force -ErrorAction Stop; $restore += $svc } catch { } }
+        if ($s -and $s.Status -eq 'Running') { try { Stop-Service -Name $svc -Force -ErrorAction Stop; $restore += $svc } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
     }
     try {
         $roots = @(& $Category.Paths)
@@ -5387,7 +5477,7 @@ function Invoke-CleanupCategory {
             foreach ($d in ($dirs | Sort-Object { $_.FullName.Length } -Descending)) { try { if (-not $d.EnumerateFileSystemInfos().GetEnumerator().MoveNext()) { $d.Delete() } } catch { } }
         }
     } finally {
-        foreach ($svc in $restore) { try { Start-Service -Name $svc -ErrorAction SilentlyContinue } catch { } }
+        foreach ($svc in $restore) { try { Start-Service -Name $svc -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
     }
     return @{ Freed=$freed; Skipped=$skipped }
 }
@@ -5922,13 +6012,13 @@ function Repair-Connectivity {
             }
         }
     }
-    foreach ($name in $defaults.Keys) { if ($defaults[$name] -eq 'Automatic') { try { Start-Service -Name $name -ErrorAction SilentlyContinue } catch { } } }
+    foreach ($name in $defaults.Keys) { if ($defaults[$name] -eq 'Automatic') { try { Start-Service -Name $name -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
     $driverMsg = ''
     if ($Kind -eq 'Bluetooth') {
         foreach ($d in @(Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.Present -and $_.Status -eq 'Error' -and $_.InstanceId -match '^(USB|PCI)\\' })) {
-            try { Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction Stop; $changed += ('enabled {0}' -f $d.FriendlyName) } catch { }
+            try { Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction Stop; $changed += ('enabled {0}' -f $d.FriendlyName) } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
         }
-        try { Start-Service -Name 'bthserv' -ErrorAction SilentlyContinue } catch { }
+        try { Start-Service -Name 'bthserv' -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
         $radios = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { ([string]$_.PNPClass -eq 'Bluetooth' -or [string]$_.Name -match '(?i)bluetooth') -and [string]$_.PNPDeviceID -match '^(USB|PCI)\\' })
         $noDrv = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -eq 28 -and [string]$_.Name -match '(?i)bluetooth' })
         if ($noDrv.Count) { $driverMsg = ('Windows found a Bluetooth adapter but has no driver for it ({0}). Install the Bluetooth driver from your motherboard or PC maker''s support page, or from the Wi-Fi card maker (Intel, MediaTek, Realtek or Qualcomm), then restart.' -f (($noDrv | ForEach-Object { $_.Name }) -join ', ')) }
@@ -5941,8 +6031,8 @@ function Repair-Connectivity {
         $isWifi = ($Kind -eq 'WiFi')
         $match = { param($a) $wl = ([string]$a.PhysicalMediaType -match '802\.11|Wireless') -or ([string]$a.InterfaceDescription -match '(?i)Wi-?Fi|Wireless|WLAN|802\.11'); if ($isWifi) { $wl } else { -not $wl } }
         $adapters = @(Get-NetAdapter -Physical -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { & $match $_ })
-        foreach ($a in @($adapters | Where-Object { $_.Status -eq 'Disabled' })) { try { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $changed += ('enabled adapter {0}' -f $a.Name) } catch { } }
-        foreach ($a in $adapters) { try { $b = Get-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip -ErrorAction Stop; if (-not $b.Enabled) { Enable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip -ErrorAction Stop; $changed += ('IPv4 turned back on for {0}' -f $a.Name) } } catch { } }
+        foreach ($a in @($adapters | Where-Object { $_.Status -eq 'Disabled' })) { try { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $changed += ('enabled adapter {0}' -f $a.Name) } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
+        foreach ($a in $adapters) { try { $b = Get-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip -ErrorAction Stop; if (-not $b.Enabled) { Enable-NetAdapterBinding -Name $a.Name -ComponentID ms_tcpip -ErrorAction Stop; $changed += ('IPv4 turned back on for {0}' -f $a.Name) } } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
         $word = if ($isWifi) { 'Wi-Fi' } else { 'Ethernet' }
         $pattern = if ($isWifi) { '(?i)wi-?fi|wireless|wlan|802\.11' } else { '(?i)ethernet|gbe|lan|network controller|realtek pcie|intel.*i2[12]\d' }
         $noDrv = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.ConfigManagerErrorCode -eq 28 -and ([string]$_.Name -match $pattern -or ([string]$_.PNPDeviceID -like 'PCI\*' -and [string]$_.Name -match '(?i)network|ethernet|controller')) })
@@ -7186,6 +7276,7 @@ function Restore-GameBackup {
     if (-not $last) { [System.Windows.MessageBox]::Show(('No {0} backup yet. One is made every time you save.' -f $Game.Title),'Game settings','OK','Information') | Out-Null; return }
     if (Get-Process -Name $Game.Process -ErrorAction SilentlyContinue) { [System.Windows.MessageBox]::Show(('Close {0} first.' -f $Game.Title),'Game settings','OK','Warning') | Out-Null; return }
     if ([System.Windows.MessageBox]::Show(('Put back the {0} settings saved before the change at {1}?' -f $Game.Title,$last.Name),'Game settings','OKCancel','Question') -ne 'OK') { return }
+    if (-not (Test-TrustedDataFile (Join-Path $last.FullName 'backup.json'))) { [System.Windows.MessageBox]::Show('That backup was not made by Rion Tool, so it was not used.','Game settings','OK','Warning') | Out-Null; return }
     $meta = Get-Content -LiteralPath (Join-Path $last.FullName 'backup.json') -Raw | ConvertFrom-Json
     foreach ($property in $meta.Files.PSObject.Properties) {
         $dest = [string]$property.Value
@@ -8249,7 +8340,7 @@ function Build-DebloatList {
         $name=[string]$program.DisplayName; $protected=$false
         foreach($pattern in $script:KeepProgramPatterns){ if($name -like $pattern){$protected=$true;break} }
         $cb=New-Object Windows.Controls.CheckBox; $cb.Content=$name; $cb.Margin='0,2,0,2'; $cb.ToolTip=([string]$program.Publisher)
-        $cb.IsChecked=$false; $cb.Tag=@{Kind='program';Name=$name;Label=$name;Uninstall=[string]$program.UninstallString;Quiet=[string]$program.QuietUninstallString}
+        $cb.IsChecked=$false; $cb.Tag=@{Kind='program';Name=$name;Label=$name;Uninstall=[string]$program.UninstallString;Quiet=[string]$program.QuietUninstallString;PerUser=([string]$program.PSPath -match 'HKEY_CURRENT_USER')}
         if($protected){$cb.IsEnabled=$true}
         [void]$programGrid.Children.Add($cb); $script:ProgramChecks += $cb
     }
@@ -8351,6 +8442,14 @@ function Invoke-ProgramUninstall {
     param($Program)
     $command=if($Program.Quiet){[string]$Program.Quiet}else{[string]$Program.Uninstall}
     if(-not $command){throw 'No uninstall command is registered for this program.'}
+    if($Program.PerUser){
+        $runas=Join-Path $env:SystemRoot 'System32\runas.exe'
+        $inner=('{0} /d /s /c "{1}"' -f $env:ComSpec,$command) -replace '"','\"'
+        $proc=Start-Process -FilePath $runas -ArgumentList @('/trustlevel:0x20000',('"{0}"' -f $inner)) -Wait -PassThru -WindowStyle Hidden
+        if ($proc.ExitCode -ne 0) { throw "Could not start the per-user uninstaller without administrator rights (exit code $($proc.ExitCode))." }
+        Write-Log ('{0} is installed for your account only, so its uninstaller was started without administrator rights. Finish it in its own window.' -f $Program.Name) 'Info'
+        return
+    }
     if($command -match '(?i)msiexec(?:\.exe)?\s+.*?/i\s*(\{[0-9a-f-]+\})'){
         $proc=Start-Process msiexec.exe -ArgumentList @('/x',$Matches[1],'/qn','/norestart') -Wait -PassThru
     } else {
@@ -8486,7 +8585,7 @@ function Save-DetectionCache {
 }
 function Read-DetectionCache {
     try {
-        if (-not (Test-Path -LiteralPath $script:DetectionCachePath)) { return $false }
+        if (-not (Test-TrustedDataFile $script:DetectionCachePath)) { return $false }
         $j = Get-Content -LiteralPath $script:DetectionCachePath -Raw -ErrorAction Stop | ConvertFrom-Json
         if ([string]$j.Build -ne $script:Build) { return $false }
         $det = @{}
