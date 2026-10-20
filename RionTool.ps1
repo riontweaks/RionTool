@@ -1103,6 +1103,7 @@ function Get-DropdownRecords {
         'net.qos.bandwidth' { $records += Get-RegValueRecord -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' -Name 'DOPercentageMaxBackgroundBandwidth' }
         'gpu.hags' { $records += Get-RegValueRecord -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' }
         'gpu.gamemode' { foreach ($n in 'AutoGameModeEnabled','AllowAutoGameMode') { $records += Get-RegValueRecord -Path 'HKCU:\Software\Microsoft\GameBar' -Name $n } }
+        { $script:AdlxIndex -and $script:AdlxIndex.ContainsKey([string]$_) } { $adlxRecord = Get-AdlxRecord $Id; if ($adlxRecord) { $records += $adlxRecord } }
         'cpu.plan' { $records += @{ kind='powerScheme'; path='active'; name='scheme'; guid=(Get-ActiveSchemeGuid) } }
         'cpu.boost' { $r = Get-PowerIndexRecord 'PERFBOOSTMODE'; if ($r) { $records += $r } }
         'sec.vbs' {
@@ -1175,6 +1176,7 @@ function Clear-Journal {
 function Restore-OriginalRecord {
     param($Record)
     switch ($Record.kind) {
+        'adlx' { Restore-AdlxRecord $Record }
         'classicMenuState' {
             Restore-OriginalRecord $Record.original
             $leaf = "$($Record.path)\$($Record.name)"
@@ -2670,6 +2672,516 @@ foreach ($t in $script:Tweaks) {
     $t.Risk = if ($t.Risk -eq 'Risky' -or $script:RiskyIds -contains $t.Id) { 'Risky' } elseif ($t.Risk -eq 'Moderate' -or $script:ModerateIds -contains $t.Id) { 'Moderate' } else { 'Safe' }
     if ($script:BuiltOnLaptop -and $script:LaptopRisky -contains $t.Id) { $t.Risk = 'Risky' }
 }
+$script:RionAdlxSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class RionAdlx {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryExW(string name, IntPtr file, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr GetProcAddress(IntPtr h, string name);
+    [StructLayout(LayoutKind.Sequential)] public struct IntRange { public int Min; public int Max; public int Step; }
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int FullVersionFn(out ulong v);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int InitFn(ulong v, out IntPtr sys);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int TermFn();
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate long RetLong(IntPtr self);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate uint RetUInt(IntPtr self);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int Call0(IntPtr self);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutPtr(IntPtr self, out IntPtr p);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int PtrOutPtr(IntPtr self, IntPtr a, out IntPtr p);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int UIntOutPtr(IntPtr self, uint a, out IntPtr p);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)] delegate int QiFn(IntPtr self, [MarshalAs(UnmanagedType.LPWStr)] string iid, out IntPtr p);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutByte(IntPtr self, out byte b);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int InByte(IntPtr self, byte b);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutInt(IntPtr self, out int v);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int InInt(IntPtr self, int v);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutDouble(IntPtr self, out double v);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutRange(IntPtr self, out IntRange r);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutRange2(IntPtr self, out IntRange a, out IntRange b);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int PtrOutByte(IntPtr self, IntPtr a, out byte b);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int PtrCall(IntPtr self, IntPtr a);
+    static readonly object Gate = new object();
+    static IntPtr lib, sys, gpu, display;
+    static TermFn term;
+    static bool displaySearched;
+    static readonly Dictionary<string, IntPtr> cache = new Dictionary<string, IntPtr>();
+    static readonly List<IntPtr> owned = new List<IntPtr>();
+    public static string GpuName = "";
+    public static string DisplayName = "";
+    public static string LastError = "";
+    public static ulong Version;
+    static IntPtr Slot(IntPtr o, int i) { return Marshal.ReadIntPtr(Marshal.ReadIntPtr(o), i * IntPtr.Size); }
+    static T F<T>(IntPtr o, int i) where T : class { return (T)(object)Marshal.GetDelegateForFunctionPointer(Slot(o, i), typeof(T)); }
+    public static string ResultName(int r) {
+        string[] n = { "OK", "already enabled", "already initialized", "failed", "invalid value", "bad version", "not available in this driver", "terminated", "driver not ready", "not found", "invalid object", "orphan objects", "not supported on this GPU", "another change is still running", "GPU inactive", "GPU in use", "timed out", "not active", "reset to factory needed first" };
+        return (r >= 0 && r < n.Length) ? n[r] : ("code " + r);
+    }
+    static void Check(int r, string what) { if (r != 0 && r != 1) throw new InvalidOperationException(what + ": " + ResultName(r)); }
+    static void Release(IntPtr o) { if (o != IntPtr.Zero) { F<RetLong>(o, 1)(o); } }
+    public static bool Ready { get { return sys != IntPtr.Zero && gpu != IntPtr.Zero; } }
+    public static bool Init() {
+        lock (Gate) {
+            if (Ready) { return true; }
+            try {
+                string path = System.IO.Path.Combine(Environment.SystemDirectory, "amdadlx64.dll");
+                if (!System.IO.File.Exists(path)) { LastError = "AMD Software is not installed (amdadlx64.dll is missing)."; return false; }
+                if (lib == IntPtr.Zero) { lib = LoadLibraryExW(path, IntPtr.Zero, 0x800); }
+                if (lib == IntPtr.Zero) { LastError = "Could not load amdadlx64.dll (error " + Marshal.GetLastWin32Error() + ")."; return false; }
+                IntPtr pv = GetProcAddress(lib, "ADLXQueryFullVersion"), pi = GetProcAddress(lib, "ADLXInitialize"), pt = GetProcAddress(lib, "ADLXTerminate");
+                if (pv == IntPtr.Zero || pi == IntPtr.Zero || pt == IntPtr.Zero) { LastError = "amdadlx64.dll does not export the ADLX entry points."; return false; }
+                ulong ver;
+                Check(((FullVersionFn)Marshal.GetDelegateForFunctionPointer(pv, typeof(FullVersionFn)))(out ver), "ADLX version");
+                Version = ver;
+                term = (TermFn)Marshal.GetDelegateForFunctionPointer(pt, typeof(TermFn));
+                Check(((InitFn)Marshal.GetDelegateForFunctionPointer(pi, typeof(InitFn)))(ver, out sys), "ADLX start");
+                IntPtr list;
+                Check(F<OutPtr>(sys, 1)(sys, out list), "GPU list");
+                try {
+                    uint n = F<RetUInt>(list, 3)(list);
+                    long bestScore = -1;
+                    for (uint i = 0; i < n; i++) {
+                        IntPtr g;
+                        if (F<UIntOutPtr>(list, 11)(list, i, out g) != 0 || g == IntPtr.Zero) { continue; }
+                        int type = 0, vram = 0; byte ext = 0;
+                        F<OutInt>(g, 5)(g, out type);
+                        F<OutByte>(g, 6)(g, out ext);
+                        F<OutInt>(g, 11)(g, out vram);
+                        long score = (type == 2 ? 4000000000L : 0L) + (ext != 0 ? 2000000000L : 0L) + (uint)vram;
+                        if (score > bestScore) { Release(gpu); gpu = g; bestScore = score; } else { Release(g); }
+                    }
+                } finally { Release(list); }
+                if (gpu == IntPtr.Zero) { LastError = "No AMD GPU was found."; Shutdown(); return false; }
+                IntPtr np;
+                if (F<OutPtr>(gpu, 7)(gpu, out np) == 0 && np != IntPtr.Zero) { GpuName = Marshal.PtrToStringAnsi(np); }
+                LastError = "";
+                return true;
+            } catch (Exception e) { LastError = e.Message; Shutdown(); return false; }
+        }
+    }
+    public static void Shutdown() {
+        lock (Gate) {
+            foreach (IntPtr p in owned) { try { Release(p); } catch { } }
+            owned.Clear(); cache.Clear();
+            try { Release(display); } catch { }
+            try { Release(gpu); } catch { }
+            display = IntPtr.Zero; gpu = IntPtr.Zero; displaySearched = false;
+            if (sys != IntPtr.Zero && term != null) { try { term(); } catch { } }
+            sys = IntPtr.Zero;
+        }
+    }
+    static IntPtr Own(IntPtr p) { if (p != IntPtr.Zero) { owned.Add(p); } return p; }
+    static IntPtr QI(IntPtr o, string iid) {
+        IntPtr p;
+        Check(F<QiFn>(o, 2)(o, iid, out p), iid);
+        if (p == IntPtr.Zero) { throw new InvalidOperationException(iid + ": not available in this driver"); }
+        return Own(p);
+    }
+    static IntPtr Service(string svc) {
+        IntPtr p;
+        if (cache.TryGetValue("svc:" + svc, out p)) { return p; }
+        switch (svc) {
+            case "3d": Check(F<OutPtr>(sys, 7)(sys, out p), "3D settings"); Own(p); break;
+            case "tune": Check(F<OutPtr>(sys, 8)(sys, out p), "GPU tuning"); Own(p); break;
+            case "disp": Check(F<OutPtr>(sys, 3)(sys, out p), "Display settings"); Own(p); break;
+            case "perf": Check(F<OutPtr>(sys, 9)(sys, out p), "Performance metrics"); Own(p); break;
+            case "3d1": p = QI(Service("3d"), "IADLX3DSettingsServices1"); break;
+            case "3d2": p = QI(Service("3d"), "IADLX3DSettingsServices2"); break;
+            case "3d3": p = QI(Service("3d"), "IADLX3DSettingsServices3"); break;
+            case "tune1": p = QI(Service("tune"), "IADLXGPUTuningServices1"); break;
+            case "disp1": p = QI(Service("disp"), "IADLXDisplayServices1"); break;
+            case "disp2": p = QI(Service("disp"), "IADLXDisplayServices2"); break;
+            case "disp3": p = QI(Service("disp"), "IADLXDisplayServices3"); break;
+            case "sys1": p = QI(sys, "IADLXSystem1"); break;
+            case "power": { IntPtr s1 = Service("sys1"); Check(F<OutPtr>(s1, 3)(s1, out p), "Power tuning"); Own(p); break; }
+            default: throw new ArgumentException("Unknown ADLX service " + svc);
+        }
+        cache["svc:" + svc] = p;
+        return p;
+    }
+    static IntPtr Display() {
+        if (displaySearched) { return display; }
+        displaySearched = true;
+        IntPtr ds = Service("disp"), list;
+        if (F<OutPtr>(ds, 4)(ds, out list) != 0 || list == IntPtr.Zero) { return IntPtr.Zero; }
+        try {
+            int want = 0; F<OutInt>(gpu, 18)(gpu, out want);
+            uint n = F<RetUInt>(list, 3)(list);
+            for (uint i = 0; i < n; i++) {
+                IntPtr d;
+                if (F<UIntOutPtr>(list, 11)(list, i, out d) != 0 || d == IntPtr.Zero) { continue; }
+                IntPtr g; int id = -1;
+                if (F<OutPtr>(d, 12)(d, out g) == 0 && g != IntPtr.Zero) { F<OutInt>(g, 18)(g, out id); Release(g); }
+                if (id == want && display == IntPtr.Zero) {
+                    display = d;
+                    IntPtr np;
+                    if (F<OutPtr>(d, 6)(d, out np) == 0 && np != IntPtr.Zero) { DisplayName = Marshal.PtrToStringAnsi(np); }
+                } else { Release(d); }
+            }
+        } finally { Release(list); }
+        return display;
+    }
+    public static bool HasDisplay() { lock (Gate) { return Ready && Display() != IntPtr.Zero; } }
+    public static IntPtr Feature(string svc, int slot, int arg, string qi) {
+        lock (Gate) {
+            if (!Ready) { throw new InvalidOperationException("ADLX is not started."); }
+            string key = svc + "|" + slot + "|" + arg + "|" + qi;
+            IntPtr p;
+            if (cache.TryGetValue(key, out p)) { return p; }
+            IntPtr s = Service(svc);
+            int r;
+            if (arg == 0) { r = F<OutPtr>(s, slot)(s, out p); }
+            else if (arg == 1) { r = F<PtrOutPtr>(s, slot)(s, gpu, out p); }
+            else {
+                IntPtr d = Display();
+                if (d == IntPtr.Zero) { throw new InvalidOperationException("No display is connected to " + GpuName); }
+                r = F<PtrOutPtr>(s, slot)(s, d, out p);
+            }
+            Check(r, "Setting");
+            if (p == IntPtr.Zero) { throw new InvalidOperationException("Setting: not supported on this GPU"); }
+            Own(p);
+            if (!string.IsNullOrEmpty(qi)) { p = QI(p, qi); }
+            cache[key] = p;
+            return p;
+        }
+    }
+    public static IntPtr ServiceOf(string svc) { lock (Gate) { if (!Ready) { throw new InvalidOperationException("ADLX is not started."); } return Service(svc); } }
+    public static bool GetBool(IntPtr o, int slot) { lock (Gate) { byte b; Check(F<OutByte>(o, slot)(o, out b), "Read"); return b != 0; } }
+    public static void SetBool(IntPtr o, int slot, bool v) { lock (Gate) { Check(F<InByte>(o, slot)(o, (byte)(v ? 1 : 0)), "Change"); } }
+    public static int GetInt(IntPtr o, int slot) { lock (Gate) { int v; Check(F<OutInt>(o, slot)(o, out v), "Read"); return v; } }
+    public static void SetInt(IntPtr o, int slot, int v) { lock (Gate) { Check(F<InInt>(o, slot)(o, v), "Change"); } }
+    public static int[] GetRange(IntPtr o, int slot) { lock (Gate) { IntRange r; Check(F<OutRange>(o, slot)(o, out r), "Range"); return new int[] { r.Min, r.Max, r.Step }; } }
+    public static void Invoke(IntPtr o, int slot) { lock (Gate) { Check(F<Call0>(o, slot)(o), "Action"); } }
+    public static bool GpuBool(string svc, int slot) { lock (Gate) { IntPtr s = ServiceOf(svc); byte b; Check(F<PtrOutByte>(s, slot)(s, gpu, out b), "Read"); return b != 0; } }
+    public static void GpuInvoke(string svc, int slot) { lock (Gate) { IntPtr s = ServiceOf(svc); Check(F<PtrCall>(s, slot)(s, gpu), "Action"); } }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int IntOutByte(IntPtr self, int v, out byte b);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int PtrOutInt(IntPtr self, IntPtr a, out int v);
+    public static bool SupportsValue(IntPtr o, int slot, int v) { lock (Gate) { byte b; return F<IntOutByte>(o, slot)(o, v, out b) == 0 && b != 0; } }
+    public static int[] GetFanRanges(IntPtr fan) { lock (Gate) { IntRange s, t; Check(F<OutRange2>(fan, 3)(fan, out s, out t), "Fan ranges"); return new int[] { s.Min, s.Max, s.Step, t.Min, t.Max, t.Step }; } }
+    public static int[] GetFanCurve(IntPtr fan) { return GetFanCurveAt(fan, 4); }
+    public static int[] GetFanCurveAt(IntPtr fan, int slot) {
+        lock (Gate) {
+            IntPtr list;
+            Check(F<OutPtr>(fan, slot)(fan, out list), "Fan curve");
+            try {
+                uint n = F<RetUInt>(list, 3)(list);
+                int[] r = new int[n * 2];
+                for (uint i = 0; i < n; i++) {
+                    IntPtr s;
+                    Check(F<UIntOutPtr>(list, 11)(list, i, out s), "Fan point");
+                    try { int sp, tp; Check(F<OutInt>(s, 3)(s, out sp), "Fan speed"); Check(F<OutInt>(s, 5)(s, out tp), "Fan temperature"); r[i * 2] = sp; r[i * 2 + 1] = tp; }
+                    finally { Release(s); }
+                }
+                return r;
+            } finally { Release(list); }
+        }
+    }
+    public static void SetFanCurve(IntPtr fan, int[] v) {
+        lock (Gate) {
+            IntPtr list;
+            Check(F<OutPtr>(fan, 5)(fan, out list), "Fan curve");
+            try {
+                uint n = F<RetUInt>(list, 3)(list);
+                if (v == null || v.Length != n * 2) { throw new ArgumentException("The fan curve needs " + n + " points."); }
+                for (uint i = 0; i < n; i++) {
+                    IntPtr s;
+                    Check(F<UIntOutPtr>(list, 11)(list, i, out s), "Fan point");
+                    try { Check(F<InInt>(s, 4)(s, v[i * 2]), "Fan speed"); Check(F<InInt>(s, 6)(s, v[i * 2 + 1]), "Fan temperature"); }
+                    finally { Release(s); }
+                }
+                int bad;
+                int r = F<PtrOutInt>(fan, 6)(fan, list, out bad);
+                if (r != 0) { throw new InvalidOperationException("Fan curve point " + (bad + 1) + " is not allowed: " + ResultName(r)); }
+                Check(F<PtrCall>(fan, 7)(fan, list), "Fan curve");
+            } finally { Release(list); }
+        }
+    }
+    static bool[] metricSupport;
+    public static double[] Metrics() {
+        lock (Gate) {
+            if (!Ready) { return null; }
+            IntPtr perf = Service("perf");
+            if (metricSupport == null) {
+                metricSupport = new bool[10];
+                IntPtr sup;
+                if (F<PtrOutPtr>(perf, 21)(perf, gpu, out sup) == 0 && sup != IntPtr.Zero) {
+                    for (int i = 0; i < 10; i++) { byte b = 0; F<OutByte>(sup, 3 + i)(sup, out b); metricSupport[i] = b != 0; }
+                    Release(sup);
+                }
+            }
+            IntPtr m;
+            if (F<PtrOutPtr>(perf, 18)(perf, gpu, out m) != 0 || m == IntPtr.Zero) { return null; }
+            double[] v = new double[10];
+            for (int i = 0; i < 10; i++) { v[i] = double.NaN; }
+            try {
+                double d; int x;
+                if (metricSupport[0] && F<OutDouble>(m, 4)(m, out d) == 0) { v[0] = d; }
+                if (metricSupport[1] && F<OutInt>(m, 5)(m, out x) == 0) { v[1] = x; }
+                if (metricSupport[2] && F<OutInt>(m, 6)(m, out x) == 0) { v[2] = x; }
+                if (metricSupport[3] && F<OutDouble>(m, 7)(m, out d) == 0) { v[3] = d; }
+                if (metricSupport[4] && F<OutDouble>(m, 8)(m, out d) == 0) { v[4] = d; }
+                if (metricSupport[5] && F<OutDouble>(m, 9)(m, out d) == 0) { v[5] = d; }
+                if (metricSupport[6] && F<OutDouble>(m, 10)(m, out d) == 0) { v[6] = d; }
+                if (metricSupport[7] && F<OutInt>(m, 11)(m, out x) == 0) { v[7] = x; }
+                if (metricSupport[8] && F<OutInt>(m, 12)(m, out x) == 0) { v[8] = x; }
+                if (metricSupport[9] && F<OutInt>(m, 13)(m, out x) == 0) { v[9] = x; }
+            } finally { Release(m); }
+            return v;
+        }
+    }
+}
+'@
+$script:AdlxFps = @(30,40,48,60,72,75,90,100,120,144,165,170,180,200,240,280,300,360)
+$script:AdlxCurves = [ordered]@{ 'Quiet curve'=@(20,25,35,50,70); 'Balanced curve'=@(25,35,50,65,85); 'Aggressive curve'=@(35,50,65,85,100); 'Maximum cooling curve'=@(50,65,80,100,100) }
+$script:AdlxCurveTemps = @(40,55,65,75,85)
+$script:AdlxDefs = @(
+    @{ Id='amd.gfx.antilag'; Group='Radeon graphics'; Label='Radeon Anti-Lag'; Svc='3d'; Slot=3; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Info='Lowers input lag when the GPU is the bottleneck by keeping the CPU from running ahead. Some anti-cheat games block it; turn it off if a game warns about it.' }
+    @{ Id='amd.gfx.chill'; Group='Radeon graphics'; Label='Radeon Chill'; Svc='3d'; Slot=4; Arg=1; Type='bool'; Sup=3; Get=4; Set=8; Risk='Moderate'; LowerFps=$true; Warn='Caps FPS while you are not moving.'; Info='Lowers the frame rate when you are not moving the mouse or keyboard to save power and heat. Leave it off for competitive games.' }
+    @{ Id='amd.gfx.chillmin'; Group='Radeon graphics'; Label='Radeon Chill minimum FPS'; Svc='3d'; Slot=4; Arg=1; Type='int'; Sup=3; Get=6; Set=9; Range=5; Unit='FPS'; Pick='fps'; Parent='amd.gfx.chill'; ParentOn=1; Risk='Safe'; Info='Frame rate Radeon Chill drops to when there is no input. Only used while Radeon Chill is on.' }
+    @{ Id='amd.gfx.chillmax'; Group='Radeon graphics'; Label='Radeon Chill maximum FPS'; Svc='3d'; Slot=4; Arg=1; Type='int'; Sup=3; Get=7; Set=10; Range=5; Unit='FPS'; Pick='fps'; Parent='amd.gfx.chill'; ParentOn=1; Risk='Safe'; Info='Frame rate cap Radeon Chill allows while you are moving. Only used while Radeon Chill is on.' }
+    @{ Id='amd.gfx.boost'; Group='Radeon graphics'; Label='Radeon Boost'; Svc='3d'; Slot=5; Arg=1; Type='bool'; Sup=3; Get=4; Set=7; Risk='Moderate'; Warn='Image gets blurry during fast camera movement.'; Info='Lowers the render resolution during fast mouse movement to raise FPS. Works only in supported games.' }
+    @{ Id='amd.gfx.boostres'; Group='Radeon graphics'; Label='Radeon Boost minimum resolution'; Svc='3d'; Slot=5; Arg=1; Type='int'; Sup=3; Get=6; Set=8; Range=5; Unit='%'; Pick='all'; Parent='amd.gfx.boost'; ParentOn=1; Risk='Safe'; Info='Lowest resolution Radeon Boost may drop to. Lower gives more FPS and a blurrier image.' }
+    @{ Id='amd.gfx.ris'; Group='Radeon graphics'; Label='Radeon Image Sharpening'; Svc='3d'; Slot=6; Arg=1; Type='bool'; Sup=3; Get=4; Set=7; Risk='Safe'; Info='Sharpens the image in games with almost no FPS cost. Helps when a game uses upscaling or TAA.' }
+    @{ Id='amd.gfx.rissharp'; Group='Radeon graphics'; Label='Radeon Image Sharpening strength'; Svc='3d'; Slot=6; Arg=1; Type='int'; Sup=3; Get=6; Set=8; Range=5; Unit='%'; Pick='tens'; Parent='amd.gfx.ris'; ParentOn=1; Risk='Safe'; Info='How strong the sharpening is. Very high values add halos around edges.' }
+    @{ Id='amd.gfx.esync'; Group='Radeon graphics'; Label='Radeon Enhanced Sync'; Svc='3d'; Slot=7; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Moderate'; Warn='Can cause stutter or a black screen in some games.'; Info='Removes tearing above the refresh rate with less lag than VSync. Can stutter when FPS falls below the refresh rate; with FreeSync, a frame cap is usually better.' }
+    @{ Id='amd.gfx.vsync'; Group='Radeon graphics'; Label='Wait for Vertical Refresh'; Svc='3d'; Slot=8; Arg=1; Type='enum'; Sup=3; Get=5; Set=6; Values=([ordered]@{ 'Always off'=0; 'Off, unless app specifies'=1; 'On, unless app specifies'=2; 'Always on'=3 }); Risk='Safe'; Info='Driver VSync. Always on adds input lag; Off, unless app specifies lets the game choose and is the usual pick.' }
+    @{ Id='amd.gfx.frtc'; Group='Radeon graphics'; Label='Frame Rate Target Control'; Svc='3d'; Slot=9; Arg=1; Type='bool'; Sup=3; Get=4; Set=7; Risk='Moderate'; LowerFps=$true; Warn='Caps FPS at the target below.'; Info='Driver frame rate cap. An in-game cap usually has less lag; use this when the game has no cap.' }
+    @{ Id='amd.gfx.frtcfps'; Group='Radeon graphics'; Label='Frame Rate Target Control FPS'; Svc='3d'; Slot=9; Arg=1; Type='int'; Sup=3; Get=6; Set=8; Range=5; Unit='FPS'; Pick='fps'; Parent='amd.gfx.frtc'; ParentOn=1; Risk='Safe'; Info='The frame rate cap used while Frame Rate Target Control is on.' }
+    @{ Id='amd.gfx.aamode'; Group='Radeon graphics'; Label='Anti-Aliasing'; Svc='3d'; Slot=10; Arg=1; Type='enum'; Sup=3; Get=4; Set=7; Values=([ordered]@{ 'Use application settings'=0; 'Enhance application settings'=1; 'Override application settings'=2 }); Risk='Safe'; Info='Lets the driver add or replace anti-aliasing in older DirectX 9 to 11 games. Use application settings is right for almost every game.' }
+    @{ Id='amd.gfx.aalevel'; Group='Radeon graphics'; Label='Anti-Aliasing level'; Svc='3d'; Slot=10; Arg=1; Type='enum'; Sup=3; Get=5; Set=8; Values=([ordered]@{ '2X'=2; '2X EQ'=3; '4X'=4; '4X EQ'=5; '8X'=8; '8X EQ'=9 }); Parent='amd.gfx.aamode'; ParentOn=2; Risk='Safe'; LowerFps=$true; Info='Sample count when the driver overrides anti-aliasing. Higher costs more FPS. Only used when Anti-Aliasing is set to override.' }
+    @{ Id='amd.gfx.aamethod'; Group='Radeon graphics'; Label='Anti-Aliasing method'; Svc='3d'; Slot=10; Arg=1; Type='enum'; Sup=3; Get=6; Set=9; Values=([ordered]@{ 'Multisampling'=0; 'Adaptive multisampling'=1; 'Supersampling'=2 }); Risk='Safe'; LowerFps=$true; Info='How driver anti-aliasing samples the image. Supersampling looks best and costs the most FPS.' }
+    @{ Id='amd.gfx.mlaa'; Group='Radeon graphics'; Label='Morphological Anti-Aliasing'; Svc='3d'; Slot=11; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Warn='Blurs text and UI slightly.'; Info='Post-process edge smoothing for games without their own anti-aliasing. Small FPS cost.' }
+    @{ Id='amd.gfx.af'; Group='Radeon graphics'; Label='Anisotropic Filtering'; Svc='3d'; Slot=12; Arg=1; Type='bool'; Sup=3; Get=4; Set=6; Risk='Safe'; Info='Makes textures at an angle sharper in older games. Modern games set this themselves.' }
+    @{ Id='amd.gfx.aflevel'; Group='Radeon graphics'; Label='Anisotropic Filtering level'; Svc='3d'; Slot=12; Arg=1; Type='enum'; Sup=3; Get=5; Set=7; Values=([ordered]@{ '2X'=2; '4X'=4; '8X'=8; '16X'=16 }); Parent='amd.gfx.af'; ParentOn=1; Risk='Safe'; Info='Filtering strength while driver Anisotropic Filtering is on. 16X costs almost nothing on current GPUs.' }
+    @{ Id='amd.gfx.tessmode'; Group='Radeon graphics'; Label='Tessellation mode'; Svc='3d'; Slot=13; Arg=1; Type='enum'; Sup=3; Get=4; Set=6; Values=([ordered]@{ 'AMD optimized'=0; 'Use application settings'=1; 'Override application settings'=2 }); Risk='Safe'; Info='How much geometry detail the driver allows. Override with a low level can raise FPS in older games at the cost of detail.' }
+    @{ Id='amd.gfx.tesslevel'; Group='Radeon graphics'; Label='Maximum tessellation level'; Svc='3d'; Slot=13; Arg=1; Type='enum'; Sup=3; Get=5; Set=7; Values=([ordered]@{ 'Off'=1; '2X'=2; '4X'=4; '6X'=6; '8X'=8; '16X'=16; '32X'=32; '64X'=64 }); Risk='Safe'; Info='Cap used when Tessellation mode is Override application settings.' }
+    @{ Id='amd.gfx.rsr'; Group='Radeon graphics'; Label='Radeon Super Resolution'; Svc='3d'; Slot=14; Arg=0; Type='bool'; Sup=3; Get=4; Set=5; Risk='Moderate'; Warn='Only works in exclusive fullscreen at a lower resolution; the desktop may flicker when it turns on.'; Info='Driver upscaling for games without FSR. Set the game to a lower resolution in fullscreen and RSR scales it up.' }
+    @{ Id='amd.gfx.rsrsharp'; Group='Radeon graphics'; Label='Radeon Super Resolution sharpness'; Svc='3d'; Slot=14; Arg=0; Type='int'; Sup=3; Get=7; Set=8; Range=6; Unit='%'; Pick='tens'; Parent='amd.gfx.rsr'; ParentOn=1; Risk='Safe'; Info='Sharpening applied after Radeon Super Resolution upscales the image.' }
+    @{ Id='amd.gfx.risdesktop'; Group='Radeon graphics'; Label='Radeon Image Sharpening for desktop and apps'; Svc='3d2'; Slot=18; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Info='Applies Radeon Image Sharpening to the desktop, browsers and video players too.' }
+    @{ Id='amd.gfx.fsr'; Group='Radeon graphics'; Label='AMD FidelityFX Super Resolution override'; Svc='3d3'; Slot=19; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Info='Lets the driver upgrade FSR 3.1 games to the newest FSR version.' }
+    @{ Id='amd.disp.freesync'; Group='Display'; Label='AMD FreeSync'; Svc='disp'; Slot=9; Arg=2; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Warn='Screen goes black for a moment when it changes.'; Info='Variable refresh rate. Removes tearing without VSync lag. Keep it on if your monitor supports it.' }
+    @{ Id='amd.disp.vsr'; Group='Display'; Label='Virtual Super Resolution'; Svc='disp'; Slot=10; Arg=2; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Warn='Screen goes black for a moment when it changes.'; Info='Lets games render above the monitor resolution and scale down for a sharper image, at a big FPS cost.' }
+    @{ Id='amd.disp.gpuscaling'; Group='Display'; Label='GPU Scaling'; Svc='disp'; Slot=11; Arg=2; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Warn='Screen goes black for a moment when it changes.'; Info='The GPU scales lower resolutions instead of the monitor. Needed for stretched resolutions and Integer Scaling.' }
+    @{ Id='amd.disp.scalemode'; Group='Display'; Label='Scaling mode'; Svc='disp'; Slot=12; Arg=2; Type='enum'; Sup=3; Get=4; Set=5; Values=([ordered]@{ 'Preserve aspect ratio'=0; 'Full panel'=1; 'Center'=2 }); Risk='Safe'; Warn='Screen goes black for a moment when it changes.'; Info='How lower resolutions fill the screen when GPU Scaling is on. Full panel gives stretched resolutions.' }
+    @{ Id='amd.disp.intscaling'; Group='Display'; Label='Integer Scaling'; Svc='disp'; Slot=13; Arg=2; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Info='Scales lower resolutions by whole numbers for sharp pixels (for example 1080p on a 4K screen). Needs GPU Scaling.' }
+    @{ Id='amd.disp.depth'; Group='Display'; Label='Color depth'; Svc='disp'; Slot=14; Arg=2; Type='enum'; Sup=3; Get=4; Set=5; Check=6; Values=([ordered]@{ '6 bpc'=1; '8 bpc'=2; '10 bpc'=3; '12 bpc'=4 }); Risk='Safe'; Warn='Screen goes black for a moment when it changes.'; Info='Bits per color channel sent to the monitor. Use the highest your monitor supports at its refresh rate.' }
+    @{ Id='amd.disp.pixel'; Group='Display'; Label='Pixel format'; Svc='disp'; Slot=15; Arg=2; Type='enum'; Sup=3; Get=4; Set=5; Check=6; Values=([ordered]@{ 'RGB 4:4:4 Full RGB'=1; 'YCbCr 4:4:4'=2; 'YCbCr 4:2:2'=3; 'RGB 4:4:4 Limited RGB'=4; 'YCbCr 4:2:0'=5 }); Risk='Safe'; Warn='Screen goes black for a moment when it changes.'; Info='Color signal sent to the monitor. RGB 4:4:4 Full RGB is right for PC monitors; Limited or YCbCr gives washed-out or soft colors.' }
+    @{ Id='amd.tune.preset'; Group='GPU tuning'; Label='Tuning preset'; Svc='tune'; Slot=13; Arg=1; Qi='IADLXGPUPresetTuning'; SupGpu=7; Type='preset'; Presets=([ordered]@{ 'Power Saver'=@(3,8,13); 'Quiet'=@(4,9,14); 'Balanced'=@(5,10,15); 'Turbo'=@(6,11,16); 'Rage'=@(7,12,17) }); Tuning=$true; Risk='Moderate'; Info='The tuning presets from AMD Software. Rage raises the power limit, Quiet and Power Saver lower it. Picking a preset replaces manual tuning values.' }
+    @{ Id='amd.tune.gpumax'; Group='GPU tuning'; Label='GPU maximum frequency'; Svc='tune'; Slot=14; Arg=1; Qi='IADLXManualGraphicsTuning2'; SupGpu=8; Type='int'; Get=7; Set=8; Range=6; Unit='MHz'; Pick='steps'; Nice=25; Span=300; DefQi='IADLXManualGraphicsTuning2_1'; DefSlot=13; Tuning=$true; Risk='Risky'; Warn='Too high can crash games or the driver. You get 15 seconds to keep or undo the change.'; Info='Highest GPU clock the card may boost to. Raise in small steps and test; lowering it cuts heat and power.' }
+    @{ Id='amd.tune.gpumin'; Group='GPU tuning'; Label='GPU minimum frequency'; Svc='tune'; Slot=14; Arg=1; Qi='IADLXManualGraphicsTuning2'; SupGpu=8; Type='int'; Get=4; Set=5; Range=3; Unit='MHz'; Pick='steps'; Nice=25; Span=300; DefQi='IADLXManualGraphicsTuning2_1'; DefSlot=12; Tuning=$true; Risk='Risky'; Warn='Raising it keeps the card hot and loud at idle.'; Info='Lowest clock the GPU drops to under load. Leave it at the factory value unless a game stutters from clocks dropping.' }
+    @{ Id='amd.tune.voltage'; Group='GPU tuning'; Label='GPU voltage'; Svc='tune'; Slot=14; Arg=1; Qi='IADLXManualGraphicsTuning2'; SupGpu=8; Type='int'; Get=10; Set=11; Range=9; Unit='mV'; Pick='steps'; Nice=10; Span=150; DefQi='IADLXManualGraphicsTuning2_1'; DefSlot=14; Tuning=$true; Risk='Risky'; Warn='Too low crashes games or the driver. You get 15 seconds to keep or undo the change.'; Info='Undervolting lowers heat and power and can raise sustained clocks. Lower in 10 to 25 mV steps and test each step.' }
+    @{ Id='amd.tune.vrammax'; Group='GPU tuning'; Label='VRAM maximum frequency'; Svc='tune'; Slot=15; Arg=1; Qi='IADLXManualVRAMTuning2'; SupGpu=9; Type='int'; Get=8; Set=9; Range=7; Unit='MHz'; Pick='steps'; Nice=10; Span=0; DefQi='IADLXManualVRAMTuning2_1'; DefSlot=10; Tuning=$true; Risk='Risky'; Warn='Too high causes artifacts or lower FPS from memory error correction.'; Info='Memory clock. Small gains in memory-heavy games; test with a benchmark, because too high can lower FPS.' }
+    @{ Id='amd.tune.timing'; Group='GPU tuning'; Label='Memory timing'; Svc='tune'; Slot=15; Arg=1; Qi='IADLXManualVRAMTuning2'; SupGpu=9; Type='enum'; Sup=3; Get=5; Set=6; Values=([ordered]@{ 'Default timing'=0; 'Fast Timing'=1 }); Tuning=$true; Risk='Moderate'; Warn='Can cause artifacts on some memory chips.'; Info='Tighter VRAM timings. A small, usually stable gain.' }
+    @{ Id='amd.tune.power'; Group='GPU tuning'; Label='Power limit'; Svc='tune'; Slot=17; Arg=1; Qi='IADLXManualPowerTuning'; SupGpu=11; Type='int'; Get=4; Set=5; Range=3; Unit='%rel'; Pick='all'; DefQi='IADLXManualPowerTuning1'; DefSlot=10; Tuning=$true; Risk='Moderate'; Warn='Higher raises heat, fan noise and power draw.'; Info='How much power the card may draw compared with stock. Raising it lets the GPU hold higher clocks; lowering it cuts heat.' }
+    @{ Id='amd.tune.tdc'; Group='GPU tuning'; Label='TDC limit'; Svc='tune'; Slot=17; Arg=1; Qi='IADLXManualPowerTuning'; SupGpu=11; Type='int'; Sup=6; Get=8; Set=9; Range=7; Unit='%rel'; Pick='all'; DefQi='IADLXManualPowerTuning1'; DefSlot=11; Tuning=$true; Risk='Moderate'; Info='Current limit for the GPU power stage, compared with stock.' }
+    @{ Id='amd.tune.sam'; Group='GPU tuning'; Label='Smart Access Memory'; Svc='tune1'; Slot=18; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Moderate'; Warn='Screen goes black for a few seconds while the driver restarts.'; Info='Lets the CPU access all VRAM at once (Resizable BAR). Needs Above 4G Decoding and Re-Size BAR in the BIOS. Usually a few percent more FPS.' }
+    @{ Id='amd.fan.zerorpm'; Group='Fan tuning'; Label='Zero RPM'; Svc='tune'; Slot=16; Arg=1; Qi='IADLXManualFanTuning'; SupGpu=10; Type='bool'; Sup=8; Get=9; Set=10; DefQi='IADLXManualFanTuning1'; DefSlot=27; Tuning=$true; Risk='Safe'; Info='Fans stop at low load. Off keeps them spinning, which keeps idle temperatures lower but adds noise.' }
+    @{ Id='amd.fan.curve'; Group='Fan tuning'; Label='Fan curve'; Svc='tune'; Slot=16; Arg=1; Qi='IADLXManualFanTuning'; SupGpu=10; Type='curve'; DefQi='IADLXManualFanTuning1'; DefSlot=23; Tuning=$true; Risk='Moderate'; Warn='A quieter curve lets the GPU run hotter and clock lower.'; Info='Fan speed at 40, 55, 65, 75 and 85 C. Quiet 20 to 70%, Balanced 25 to 85%, Aggressive 35 to 100%, Maximum cooling 50 to 100%.' }
+    @{ Id='amd.fan.acoustic'; Group='Fan tuning'; Label='Acoustic limit'; Svc='tune'; Slot=16; Arg=1; Qi='IADLXManualFanTuning'; SupGpu=10; Type='int'; Sup=11; Get=13; Set=14; Range=12; Unit='MHz'; Pick='steps'; Nice=25; Span=0; DefQi='IADLXManualFanTuning1'; DefSlot=24; Tuning=$true; Risk='Moderate'; Info='GPU clock at which the fans start ramping up. Lower makes the fans react sooner.' }
+    @{ Id='amd.fan.minspeed'; Group='Fan tuning'; Label='Minimum fan speed'; Svc='tune'; Slot=16; Arg=1; Qi='IADLXManualFanTuning'; SupGpu=10; Type='int'; Sup=15; Get=17; Set=18; Range=16; Unit='RPM'; Pick='steps'; Nice=50; Span=0; DefQi='IADLXManualFanTuning1'; DefSlot=25; Tuning=$true; Risk='Safe'; Info='Lowest fan speed under load.' }
+    @{ Id='amd.fan.target'; Group='Fan tuning'; Label='Target fan speed'; Svc='tune'; Slot=16; Arg=1; Qi='IADLXManualFanTuning'; SupGpu=10; Type='int'; Sup=19; Get=21; Set=22; Range=20; Unit='RPM'; Pick='steps'; Nice=50; Span=0; DefQi='IADLXManualFanTuning1'; DefSlot=26; Tuning=$true; Risk='Moderate'; Warn='Too low lets the GPU run hotter and clock lower.'; Info='Fan speed the card aims for under load. Higher is cooler and louder.' }
+)
+$script:AdlxIndex = @{}
+foreach ($d in $script:AdlxDefs) { $script:AdlxIndex[$d.Id] = $d }
+$script:AdlxRowIds = @()
+function Initialize-Adlx {
+    if ($script:AdlxFailed) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\amdadlx64.dll'))) { return $false }
+    try {
+        if (-not ('RionAdlx' -as [type])) { Add-Type -TypeDefinition $script:RionAdlxSource -Language CSharp -ErrorAction Stop }
+        if ([RionAdlx]::Init()) { return $true }
+        Write-Log ("AMD Software settings are unavailable: {0}" -f [RionAdlx]::LastError) 'Warn'
+    } catch { Write-Log ("AMD Software settings are unavailable: {0}" -f $_.Exception.Message) 'Warn' }
+    $script:AdlxFailed = $true
+    return $false
+}
+function Get-AdlxError { param($ErrorRecord) $e = $ErrorRecord.Exception; while ($e.InnerException) { $e = $e.InnerException }; return $e.Message }
+function Get-AdlxFeature { param($Def) return [RionAdlx]::Feature([string]$Def.Svc,[int]$Def.Slot,[int]$Def.Arg,[string]$Def.Qi) }
+function Get-AdlxRaw {
+    param($Def)
+    $o = Get-AdlxFeature $Def
+    switch ($Def.Type) {
+        'bool' { return [int][RionAdlx]::GetBool($o,[int]$Def.Get) }
+        'curve' { return (@([RionAdlx]::GetFanCurve($o)) -join ',') }
+        'preset' { foreach ($n in $Def.Presets.Keys) { if ([RionAdlx]::GetBool($o,[int]$Def.Presets[$n][1])) { return $n } }; return '' }
+        default { return [RionAdlx]::GetInt($o,[int]$Def.Get) }
+    }
+}
+function Set-AdlxRawDirect {
+    param($Def,$Value)
+    $o = Get-AdlxFeature $Def
+    switch ($Def.Type) {
+        'bool' { [RionAdlx]::SetBool($o,[int]$Def.Set,([int]$Value -ne 0)) }
+        'curve' { [RionAdlx]::SetFanCurve($o,[int[]]@(([string]$Value) -split ',' | ForEach-Object { [int]$_ })) }
+        'preset' { if (-not $Def.Presets.Contains([string]$Value)) { throw ("Unknown tuning preset {0}." -f $Value) }; [RionAdlx]::Invoke($o,[int]$Def.Presets[[string]$Value][2]) }
+        default { [RionAdlx]::SetInt($o,[int]$Def.Set,[int]$Value) }
+    }
+}
+function Get-AdlxFactory {
+    param($Def)
+    if (-not $Def.DefQi) { return $null }
+    try {
+        $o = [RionAdlx]::Feature([string]$Def.Svc,[int]$Def.Slot,[int]$Def.Arg,[string]$Def.DefQi)
+        switch ($Def.Type) {
+            'bool' { return [int][RionAdlx]::GetBool($o,[int]$Def.DefSlot) }
+            'curve' { return (@([RionAdlx]::GetFanCurveAt($o,[int]$Def.DefSlot)) -join ',') }
+            default { return [RionAdlx]::GetInt($o,[int]$Def.DefSlot) }
+        }
+    } catch { return $null }
+}
+function Get-AdlxCurveValue {
+    param($Def,[string]$Name)
+    $o = Get-AdlxFeature $Def
+    $r = @([RionAdlx]::GetFanRanges($o))
+    $points = @([RionAdlx]::GetFanCurve($o)).Count / 2
+    if ($points -ne $script:AdlxCurveTemps.Count) { return $null }
+    $speeds = @($script:AdlxCurves[$Name])
+    $out = for ($i = 0; $i -lt $points; $i++) {
+        [Math]::Min([int]$r[1],[Math]::Max([int]$r[0],[int]$speeds[$i]))
+        [Math]::Min([int]$r[4],[Math]::Max([int]$r[3],[int]$script:AdlxCurveTemps[$i]))
+    }
+    return (@($out) -join ',')
+}
+function Format-AdlxValue {
+    param($Def,$Raw)
+    $factory = Get-AdlxFactory $Def
+    $mark = if ($null -ne $factory -and [string]$factory -eq [string]$Raw) { ' (factory)' } else { '' }
+    switch ($Def.Type) {
+        'bool' { return ($(if ([int]$Raw -ne 0) { 'On' } else { 'Off' }) + $mark) }
+        'preset' { if ($Raw) { return [string]$Raw }; return 'Custom' }
+        'curve' {
+            if ($mark) { return 'Factory curve' }
+            foreach ($n in $script:AdlxCurves.Keys) { if ((Get-AdlxCurveValue $Def $n) -eq [string]$Raw) { return $n } }
+            return 'Custom curve'
+        }
+        'enum' { foreach ($k in $Def.Values.Keys) { if ([int]$Def.Values[$k] -eq [int]$Raw) { return $k } }; return 'Not set' }
+        default {
+            $text = switch ([string]$Def.Unit) { '%rel' { '{0:+0;-0;0}%' -f [int]$Raw } '%' { '{0}%' -f [int]$Raw } default { '{0} {1}' -f [int]$Raw,$Def.Unit } }
+            return ($text + $mark)
+        }
+    }
+}
+function Get-AdlxOptions {
+    param($Def)
+    $o = Get-AdlxFeature $Def
+    $raw = Get-AdlxRaw $Def
+    $labels = New-Object System.Collections.ArrayList
+    switch ($Def.Type) {
+        'bool' { foreach ($v in 1,0) { [void]$labels.Add((Format-AdlxValue $Def $v)) } }
+        'enum' { foreach ($k in $Def.Values.Keys) { if (-not $Def.Check -or [RionAdlx]::SupportsValue($o,[int]$Def.Check,[int]$Def.Values[$k])) { [void]$labels.Add($k) } } }
+        'preset' { foreach ($n in $Def.Presets.Keys) { try { if ([RionAdlx]::GetBool($o,[int]$Def.Presets[$n][0])) { [void]$labels.Add($n) } } catch { } } }
+        'curve' {
+            if ($null -ne (Get-AdlxFactory $Def)) { [void]$labels.Add('Factory curve') }
+            foreach ($n in $script:AdlxCurves.Keys) { if (Get-AdlxCurveValue $Def $n) { [void]$labels.Add($n) } }
+        }
+        default {
+            $r = @([RionAdlx]::GetRange($o,[int]$Def.Range)); $min = [int]$r[0]; $max = [int]$r[1]; $step = [Math]::Max(1,[int]$r[2])
+            $values = New-Object System.Collections.ArrayList
+            switch ([string]$Def.Pick) {
+                'fps' { foreach ($v in $script:AdlxFps) { if ($v -ge $min -and $v -le $max) { [void]$values.Add($v) } } }
+                'tens' { for ($v = [int]([Math]::Ceiling($min / 10) * 10); $v -le $max; $v += 10) { [void]$values.Add($v) } }
+                'all' { for ($v = $min; $v -le $max; $v += $step) { [void]$values.Add($v) } }
+                default {
+                    $nice = [Math]::Max([int]$Def.Nice,$step)
+                    $factory = Get-AdlxFactory $Def
+                    $center = if ($null -ne $factory) { [int]$factory } else { [int]$raw }
+                    $lo = $min; $hi = $max
+                    if ([int]$Def.Span -gt 0) { $lo = [Math]::Max($min,$center - [int]$Def.Span); $hi = [Math]::Min($max,$center + [int]$Def.Span) }
+                    while ((($hi - $lo) / $nice) -gt 24) { $nice *= 2 }
+                    for ($v = [int]([Math]::Ceiling($lo / $nice) * $nice); $v -le $hi; $v += $nice) { [void]$values.Add($v) }
+                    if ($null -ne $factory) { [void]$values.Add([int]$factory) }
+                    foreach ($edge in $lo,$hi) { [void]$values.Add([int]$edge) }
+                }
+            }
+            [void]$values.Add([int]$raw)
+            $aligned = @($values | ForEach-Object { $min + [int]([Math]::Round(($_ - $min) / $step)) * $step } | Where-Object { $_ -ge $min -and $_ -le $max } | Sort-Object -Unique)
+            if ($Def.Unit -eq '%rel' -or $Def.Pick -eq 'fps' -or $Def.Pick -eq 'tens' -or $Def.Pick -eq 'all') { $aligned = @($aligned) } else { $aligned = @($aligned | Sort-Object -Descending) }
+            foreach ($v in $aligned) { [void]$labels.Add((Format-AdlxValue $Def $v)) }
+        }
+    }
+    $current = Format-AdlxValue $Def $raw
+    if (-not $labels.Contains($current) -and $Def.Type -ne 'preset') { [void]$labels.Add($current) }
+    return @('Default') + @($labels)
+}
+function ConvertFrom-AdlxChoice {
+    param($Def,[string]$Choice)
+    switch ($Def.Type) {
+        'bool' { if ($Choice -like 'On*') { return 1 }; if ($Choice -like 'Off*') { return 0 } }
+        'enum' { if ($Def.Values.Contains($Choice)) { return [int]$Def.Values[$Choice] } }
+        'preset' { if ($Def.Presets.Contains($Choice)) { return $Choice } }
+        'curve' {
+            if ($Choice -eq 'Factory curve') { $f = Get-AdlxFactory $Def; if ($f) { return $f } }
+            if ($script:AdlxCurves.Contains($Choice)) { $c = Get-AdlxCurveValue $Def $Choice; if ($c) { return $c } }
+        }
+        default { $m = [regex]::Match($Choice,'^[-+]?\d+'); if ($m.Success) { return [int]$m.Value } }
+    }
+    throw ("'{0}' is not a value Rion Tool can set for {1}." -f $Choice,$Def.Label)
+}
+function Test-AdlxSupported {
+    param($Def)
+    try {
+        if ($Def.SupGpu -and -not [RionAdlx]::GpuBool('tune',[int]$Def.SupGpu)) { return $false }
+        $o = Get-AdlxFeature $Def
+        if ($Def.Sup -and -not [RionAdlx]::GetBool($o,[int]$Def.Sup)) { return $false }
+        [void](Get-AdlxRaw $Def)
+        return $true
+    } catch { return $false }
+}
+function Set-AdlxValue {
+    param($Def,$Value)
+    $parent = if ($Def.Parent) { $script:AdlxIndex[[string]$Def.Parent] } else { $null }
+    $parentWas = $null
+    if ($parent) {
+        $pv = Get-AdlxRaw $parent
+        if ([int]$pv -ne [int]$Def.ParentOn) { Set-AdlxRawDirect $parent $Def.ParentOn; $parentWas = $pv }
+    }
+    try { Set-AdlxRawDirect $Def $Value }
+    finally { if ($null -ne $parentWas) { Set-AdlxRawDirect $parent $parentWas } }
+    $now = Get-AdlxRaw $Def
+    if ([string]$now -ne [string]$Value) { throw ("{0} did not change: the driver still reports {1}." -f $Def.Label,(Format-AdlxValue $Def $now)) }
+}
+function Set-AdlxChoice {
+    param([string]$Id,[string]$Choice)
+    $def = $script:AdlxIndex[$Id]
+    if (-not $def) { throw ("Unknown AMD setting {0}." -f $Id) }
+    if (-not (Initialize-Adlx)) { throw 'AMD Software (ADLX) is not available, so the driver setting was not changed.' }
+    $current = Get-AdlxRaw $def
+    if ((Format-AdlxValue $def $current) -eq $Choice) { Write-Log ("{0} is already {1}." -f $def.Label,$Choice) 'Info'; return }
+    $value = ConvertFrom-AdlxChoice $def $Choice
+    try { Set-AdlxValue $def $value }
+    catch { throw ("{0}: {1}" -f $def.Label,(Get-AdlxError $_)) }
+    Write-Log ("{0} set to {1} through AMD Software." -f $def.Label,$Choice) 'Success'
+}
+function Get-AdlxRecord {
+    param([string]$Id)
+    $def = $script:AdlxIndex[$Id]
+    if (-not $def -or -not (Initialize-Adlx)) { return $null }
+    $raw = Get-AdlxRaw $def
+    $unset = ($def.Type -eq 'enum' -and -not @($def.Values.Values | Where-Object { [int]$_ -eq [int]$raw }).Count) -or ($def.Type -eq 'preset' -and -not $raw)
+    return @{ kind='adlx'; path=$Id; name='value'; value=[string]$raw; unset=[bool]$unset; gpu=[RionAdlx]::GpuName }
+}
+function Restore-AdlxRecord {
+    param($Record)
+    $def = $script:AdlxIndex[[string]$Record.path]
+    if (-not $def) { Write-Log ("Skipped an AMD setting Rion Tool no longer knows: {0}" -f $Record.path) 'Warn'; return }
+    if ($Record.unset) { Write-Log ("{0} had no value before; it is not used while its parent setting is off, so it was left as is." -f $def.Label) 'Info'; return }
+    if (-not (Initialize-Adlx)) { throw 'AMD Software (ADLX) is not available, so the original driver value could not be restored.' }
+    if ($Record.gpu -and [string]$Record.gpu -ne [RionAdlx]::GpuName) { Write-Log ("{0} was saved for {1}, but this PC now has {2}. Skipped." -f $def.Label,$Record.gpu,[RionAdlx]::GpuName) 'Warn'; return }
+    $value = if ($def.Type -in 'curve','preset') { [string]$Record.value } else { [int]$Record.value }
+    if ([string](Get-AdlxRaw $def) -eq [string]$value) { return }
+    try { Set-AdlxValue $def $value } catch { throw ("{0}: {1}" -f $def.Label,(Get-AdlxError $_)) }
+    Write-Log ("{0} restored to {1}." -f $def.Label,(Format-AdlxValue $def $value)) 'Success'
+}
+if (Initialize-Adlx) {
+    $adlxSuffix = ' Changed through AMD Software (ADLX) on {0}. Default puts back the value from before Rion Tool changed it.' -f [RionAdlx]::GpuName
+    foreach ($d in $script:AdlxDefs) {
+        if (-not (Test-AdlxSupported $d)) { continue }
+        try { $opts = @(Get-AdlxOptions $d) } catch { continue }
+        if ($opts.Count -lt 3 -and $d.Type -ne 'bool') { continue }
+        $group = if ($d.Group -eq 'Display' -and [RionAdlx]::DisplayName) { 'Display: ' + [RionAdlx]::DisplayName } else { [string]$d.Group }
+        $script:Tweaks += (New-Tweak -Id $d.Id -Tab 'AMD' -SubTab '' -Group $group -Label $d.Label -Risk $d.Risk -Type 'dropdown' -Options $opts -Detect $null -Info ([string]$d.Info + $adlxSuffix) -Warn ([string]$d.Warn))
+        $script:AdlxRowIds += $d.Id
+        if ($d.LowerFps) { $script:LowerFpsIds += $d.Id }
+    }
+}
 $script:MinimalIds = @('feat.shell.startrecs','feat.shell.startaccount','feat.shell.syncads','feat.privacy.settingsads','feat.privacy.tips','feat.privacy.silentapps','feat.shell.searchhighlights','feat.shell.bingstart','sec.privacy.cloudcontent','sec.privacy.locktips','sec.privacy.finishsetup','feat.settings.m365ads','feat.start.phonelink','task.nag.accountrecovery','sec.privacy.feedback','sec.privacy.adid','sec.privacy.tailored','svc.bg.telemetry','sec.privacy.telemetry','task.telemetry','task.tel.flighting','priv.autologger.telemetry','feat.privacy.ceip','feat.privacy.envtel','svc.tel.usagequality','gpu.nv.telemetryreg','svc.gpu.amd.uep','svc.gpu.nv.telemetry','task.gpu.nv.reports','app.vscode.telemetry','app.vs.telemetry','task.office','priv.wer.extra','feat.ai.agents','sec.recall','sec.clicktodo','feat.ai.settingsagent','feat.explorer.aiactions','feat.gaming.bgrecord','adv.prio.sep26','mem.prelaunch')
 $script:RecommendedIds = $script:MinimalIds + @('feat.ai.copilotall','feat.ai.askcopilot','feat.ai.edge','app.edge.ai','app.chrome.ai','app.brave.bloat','app.firefox.ai','feat.ai.paint','feat.ai.notepad','feat.ai.foregroundtext','feat.ai.systemmodels','sec.widgets','sec.crossresume','feat.share.dragtray','sec.privacy.activity','sec.privacy.clipboard','sec.privacy.inking','feat.privacy.input','sec.privacy.cortana','feat.privacy.langlist','feat.privacy.spotlight','priv.appcompat','app.edge.privacy','cpu.powermode.best','gpu.games.highperf','cpu.games.nothrottle','net.wifi.powersave','svc.bg.do','svc.vendor.intel','svc.vendor.inteldsa','net.green','net.eee','feat.maint.wake','app.store.archiving','app.edge.background','app.chrome.bg','app.brave.bg','app.chrome.memory','storage.longpaths','adv.crash.details','feat.signin.arso','sec.wu.asap','sec.wu.noreboot','adv.wpbt','sec.wu.nodrivers','adv.svchost','adv.prio.ifeo','task.gpu.amd.cpumetrics','task.gpu.amd.updates','svc.ai.fabric','feat.shell.fileext','feat.taskbar.endtask','feat.input.mouseaccel','feat.input.stickykeys','feat.audio.ducking','gpu.windowed','feat.shell.classicmenu')
 if ($script:BuiltOnLaptop) { $script:RecommendedIds = @($script:RecommendedIds | Where-Object { $_ -notin 'cpu.powermode.best','gpu.games.highperf','cpu.games.nothrottle','net.wifi.powersave','net.green','net.eee' }) }
@@ -3664,6 +4176,7 @@ function Invoke-Action {
         'dnsNegative' { if($Action.value -eq 'Default'){ Remove-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' -Name 'NegativeCacheTime' } else { Set-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' -Name 'NegativeCacheTime' -Value ([int]$Action.value) -Type DWord } }
         'powerValue' { $alias=[string]$Action.alias; $value=[string]$Action.value; if($value -eq 'Default'){ return }; powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $alias $value 2>$null; powercfg -setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $alias $value 2>$null; powercfg -S SCHEME_CURRENT 2>$null }
         'gameMode' { if($Action.value -eq 'Default'){ Remove-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled'; Remove-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' } else { $v=[int]($Action.value -eq 'On'); Set-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled' -Value $v -Type DWord; Set-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' -Value $v -Type DWord } }
+        'adlx' { Set-AdlxChoice -Id ([string]$Action.id) -Choice ([string]$Action.value) }
         'hardwareGpu' { if($Action.value -eq 'Default'){Remove-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode'}else{$v=[int]$Action.value;Set-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value $v -Type DWord} }
         'setDns' { Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object { try { if($Action.servers){Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $Action.servers -ErrorAction Stop}else{Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop} } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
         'setCoreParking' { if($Action.park -eq 'Default'){return}; $min=if([bool]$Action.park){0}else{100}; powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES $min 2>$null; powercfg -setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES $min 2>$null; powercfg -S SCHEME_CURRENT 2>$null }
@@ -6149,6 +6662,95 @@ $fixSections = foreach ($g in @($fixDefs | Where-Object { $_.Group -ne 'Deep cle
 $fixScroll = New-TwoColumnPanel $fixSections
 [void]$fixesPanel.Children.Add($fixScroll)
 Add-Tab 'Fixes' $fixesPanel | Out-Null
+$script:AdlxMetricNames = @('GPU clock','VRAM clock','GPU usage','GPU temperature','Hotspot','Board power','Fan speed','VRAM used','GPU voltage')
+$script:AdlxMetricText = @{}
+$script:AdlxTuningPending = @()
+function Update-AdlxMetrics {
+    if (-not $script:AdlxMetricText.Count -or -not ('RionAdlx' -as [type]) -or -not [RionAdlx]::Ready) { return }
+    $v = $null
+    try { $v = [RionAdlx]::Metrics() } catch { }
+    $fmt = { param($x,$unit,$digits) if ($null -eq $x -or [double]::IsNaN([double]$x)) { 'n/a' } else { ('{0:N' + $digits + '} {1}') -f [double]$x,$unit } }
+    $power = if ($v -and -not [double]::IsNaN($v[6])) { $v[6] } elseif ($v) { $v[5] } else { $null }
+    $values = @(
+        (& $fmt $(if ($v) { $v[1] }) 'MHz' 0), (& $fmt $(if ($v) { $v[2] }) 'MHz' 0), (& $fmt $(if ($v) { $v[0] }) '%' 0),
+        (& $fmt $(if ($v) { $v[3] }) 'C' 0), (& $fmt $(if ($v) { $v[4] }) 'C' 0), (& $fmt $power 'W' 0),
+        (& $fmt $(if ($v) { $v[7] }) 'RPM' 0), (& $fmt $(if ($v -and -not [double]::IsNaN($v[8])) { $v[8] / 1024 } else { $null }) 'GB' 2), (& $fmt $(if ($v) { $v[9] }) 'mV' 0)
+    )
+    for ($i = 0; $i -lt $script:AdlxMetricNames.Count; $i++) { $script:AdlxMetricText[$script:AdlxMetricNames[$i]].Text = ('{0}: {1}' -f $script:AdlxMetricNames[$i],$values[$i]) }
+}
+function Update-AdlxRows {
+    if (-not $script:AdlxRowIds.Count -or $script:ApplyRun -or -not ('RionAdlx' -as [type]) -or -not [RionAdlx]::Ready) { return }
+    foreach ($id in $script:AdlxRowIds) {
+        $e = $script:Rows[$id]
+        if (-not $e -or -not $e.Combo -or $e.Touched -or $e.Combo.IsDropDownOpen) { continue }
+        try { $label = Format-AdlxValue $script:AdlxIndex[$id] (Get-AdlxRaw $script:AdlxIndex[$id]) } catch { continue }
+        if (-not $e.Combo.Items.Contains($label)) { [void]$e.Combo.Items.Add($label) }
+        if ([string]$e.Combo.SelectedItem -ne $label) { $e.Combo.SelectedItem = $label }
+        $e.Touched = $false
+    }
+}
+function Show-AdlxKeepDialog {
+    param([string[]]$Labels)
+    $win = New-Object Windows.Window
+    $win.Title = 'Keep the new GPU tuning?'; $win.SizeToContent = 'WidthAndHeight'; $win.ResizeMode = 'NoResize'; $win.WindowStartupLocation = 'CenterOwner'; $win.Topmost = $true
+    try { $win.Owner = $script:Window } catch { }
+    Set-ThemeBrush $win 'Background' 'Bg'
+    $stack = New-Object Windows.Controls.StackPanel; $stack.Margin = '16'; $stack.MaxWidth = 460
+    $msg = New-HintText ("Changed: {0}.`r`n`r`nIf the screen flickers, a game crashes or the driver resets, do nothing: the old values come back automatically." -f ($Labels -join ', ')) 'Text'
+    $count = New-HintText '' 'SubText'
+    $buttons = New-Object Windows.Controls.StackPanel; $buttons.Orientation = 'Horizontal'; $buttons.HorizontalAlignment = 'Right'; $buttons.Margin = '0,8,0,0'
+    $keep = New-Object Windows.Controls.Button; $keep.Content = 'Keep'; $keep.MinWidth = 90; $keep.Margin = '0,0,8,0'
+    $undo = New-Object Windows.Controls.Button; $undo.Content = 'Undo now'; $undo.MinWidth = 90
+    foreach ($b in $keep,$undo) { [void]$buttons.Children.Add($b) }
+    foreach ($c in $msg,$count,$buttons) { [void]$stack.Children.Add($c) }
+    $win.Content = $stack
+    $state = @{ Keep = $false; Left = 15 }
+    $timer = New-Object Windows.Threading.DispatcherTimer; $timer.Interval = [TimeSpan]::FromSeconds(1)
+    $count.Text = 'Undoing in 15 seconds.'
+    $timer.Add_Tick({ $state.Left--; $count.Text = ('Undoing in {0} seconds.' -f $state.Left); if ($state.Left -le 0) { $timer.Stop(); $win.Close() } }.GetNewClosure())
+    $keep.Add_Click({ $state.Keep = $true; $timer.Stop(); $win.Close() }.GetNewClosure())
+    $undo.Add_Click({ $timer.Stop(); $win.Close() }.GetNewClosure())
+    $timer.Start()
+    [void]$win.ShowDialog()
+    $timer.Stop()
+    return [bool]$state.Keep
+}
+function Complete-AdlxApply {
+    $ids = @($script:AdlxTuningPending); $script:AdlxTuningPending = @()
+    Update-AdlxRows
+    $changed = @($ids | Where-Object { $script:Journal.ContainsKey($_) })
+    if (-not $changed.Count) { return }
+    if (Show-AdlxKeepDialog -Labels @($changed | ForEach-Object { [string]$script:AdlxIndex[$_].Label })) { Write-Log 'Kept the new GPU tuning.' 'Success'; return }
+    foreach ($id in $changed) {
+        try { Invoke-Action @{ kind='restoreRecords'; id=$id }; Write-Log ('{0} was put back to the value from before Rion Tool changed it.' -f $script:AdlxIndex[$id].Label) 'Success' }
+        catch { Write-Log ('Could not undo {0}: {1}' -f $script:AdlxIndex[$id].Label,$_.Exception.Message) 'Error' }
+    }
+    Update-AdlxRows
+}
+function New-AdlxStatusBox {
+    $children = @()
+    $children += New-HintText ('{0}, read live from AMD Software. Values below refresh every second; the settings refresh every few seconds and after Apply, so changes made in AMD Software show up here too.' -f [RionAdlx]::GpuName)
+    $grid = New-Object Windows.Controls.Primitives.UniformGrid; $grid.Columns = 3; $grid.Margin = '0,0,0,6'
+    foreach ($n in $script:AdlxMetricNames) { $tb = New-HintText ('{0}: n/a' -f $n) 'Text'; $tb.Margin = '0,1,8,1'; $script:AdlxMetricText[$n] = $tb; [void]$grid.Children.Add($tb) }
+    $children += $grid
+    $script:BuildingTab = 'AMD'
+    $shader = $null
+    try { $shader = [RionAdlx]::Feature('3d',15,1,''); if (-not [RionAdlx]::GetBool($shader,3)) { $shader = $null } } catch { $shader = $null }
+    if ($shader) {
+        $children += New-ActionRow -Label 'Reset shader cache' -Info 'Deletes the compiled shaders AMD Software keeps for games. Fixes stutter or crashes after a driver or game update. The first launch of each game afterwards takes longer while shaders rebuild.' -Act { [RionAdlx]::Invoke([RionAdlx]::Feature('3d',15,1,''),4); Write-Log 'AMD shader cache reset.' 'Success' }
+    }
+    $tuning = $false
+    foreach ($s in 6,7,8,9,10,11) { try { if ([RionAdlx]::GpuBool('tune',$s)) { $tuning = $true } } catch { } }
+    if ($tuning) {
+        $children += New-ActionRow -Label 'Reset GPU tuning to factory' -Info 'Puts every GPU and fan tuning value (clocks, voltage, VRAM, power limit, fan curve, Zero RPM) back to the factory values, the same as Reset in AMD Software. Undo records Rion Tool saved are kept.' -Act {
+            if ([System.Windows.MessageBox]::Show('Reset all GPU and fan tuning to the factory values?','AMD GPU tuning','OKCancel','Question') -ne 'OK') { return }
+            [RionAdlx]::GpuInvoke('tune',5)
+            Write-Log 'GPU tuning reset to factory values.' 'Success'
+            Update-AdlxRows
+        }
+    }
+    return (New-SectionBox -Title 'Live GPU status (AMD Software)' -Children $children)
+}
 $script:VendorTabs = @{}
 foreach ($vtab in @('AMD','NVIDIA','Intel')) {
     $items = @($script:Tweaks | Where-Object { $_.Tab -eq $vtab })
@@ -6158,6 +6760,7 @@ foreach ($vtab in @('AMD','NVIDIA','Intel')) {
         try { $grid.Children[0].Children.Insert(0,$script:NvidiaFixBox) } catch { }
         foreach ($it in $script:SearchItems) { try { if ($it.Row.Parent.Parent -eq $script:NvidiaFixBox) { $it.Tab = 'NVIDIA' } } catch { } }
     }
+    if ($vtab -eq 'AMD' -and $script:AdlxRowIds.Count) { try { $panel.Content.Children[0].Children.Insert(0,(New-AdlxStatusBox)) } catch { Write-Log ("Could not build the AMD status panel: {0}" -f $_.Exception.Message) 'Warn' } }
     $script:VendorTabs[$vtab] = Add-Tab $vtab $panel
 }
 function Update-VendorTabs {
@@ -8042,12 +8645,14 @@ function Complete-ApplyRun {
         foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled = $true }
         $script:ApplyRun = $null
         $run.Progress.Close()
+        try { Complete-AdlxApply } catch { Write-Log ("Could not finish the AMD tuning check: {0}" -f $_.Exception.Message) 'Warn' }
     }
 }
 
 function Invoke-ApplySelected {
     param($Nodes,[bool]$RestoreFirst)
     if ($script:ApplyRun) { Write-Log 'An apply is already running.' 'Warn'; return }
+    $script:AdlxTuningPending = @(@($Nodes) | Where-Object { $_.Choice -and $script:AdlxIndex.ContainsKey([string]$_.Tweak.Id) -and $script:AdlxIndex[[string]$_.Tweak.Id].Tuning } | ForEach-Object { [string]$_.Tweak.Id })
     foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled = $false }
     $started = $false
     try {
@@ -8140,6 +8745,7 @@ function Invoke-DropdownChoice {
             }
         }
         'app.discord.hwaccel' { Set-DiscordHwAccel -Choice $Choice }
+        { $script:AdlxIndex -and $script:AdlxIndex.ContainsKey([string]$_) } { Invoke-Action @{kind='adlx';id=$Tweak.Id;value=$Choice} }
         default { }
     }
 }
@@ -8728,6 +9334,7 @@ Write-Log 'Detecting CPU and GPU' 'Info'
 $timer.Start()
  
 $script:Window.Add_Closed({
+    try { if ($script:AdlxTimer) { $script:AdlxTimer.Stop() }; if ('RionAdlx' -as [type]) { [RionAdlx]::Shutdown() } } catch { }
     if ($script:HealthTimer) { $script:HealthTimer.Stop() }
     if ($script:HealthRun) { try { [void]$script:HealthRun.Ps.BeginStop($null,$null) } catch { } }
     try { if ($rs -and -not $rs.IsDisposed) { $rs.Close() } } catch { }
