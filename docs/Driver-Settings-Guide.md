@@ -103,6 +103,8 @@ Open AMD Software > Gaming > Graphics. Set Global Graphics, or open a game's own
 
 ## Valorant in-game (works with all three vendors)
 
+The Games tab can set display mode, FPS limits, Reflex / Anti-Lag 2, quality and effects, anti-aliasing, anisotropic filtering and VSync. Set **Multithreaded Rendering**, **Improve Clarity**, **Experimental Sharpening** and **Network Buffering** by hand in Valorant.
+
 - **Display Mode:** Fullscreen.
 - **Limit FPS:** Off. Or cap at a stable number if you use FreeSync/G-SYNC.
 - **NVIDIA Reflex Low Latency:** On + Boost. On AMD: turn on the in-game AMD Anti-Lag 2 setting (and Radeon Anti-Lag in AMD Software).

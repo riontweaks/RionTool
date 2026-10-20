@@ -1,6 +1,6 @@
 # Rion Tool
 
-A Windows tweak utility for gaming PCs. It is a single PowerShell script with a WPF interface. It reads how your PC is set up, explains what each change does and what it can break, and can undo anything it applied.
+A Windows tweak utility for gaming PCs. It is a single PowerShell script with a WPF interface. It reads how your PC is set up, explains what each change does and what it can break, and saves original values for reversible settings.
 
 Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShell 5.1 and administrator rights.
 
@@ -28,14 +28,14 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 **Hardware-aware pages**
 - AMD, NVIDIA and Intel tabs only show up on PCs with that hardware.
 - Network adapter settings match the driver you have: Intel, Realtek, Killer, Qualcomm, MediaTek and Broadcom Ethernet and Wi-Fi.
-- Power plan editor with every hidden setting, plus Rion's power plan.
+- Power plan editor with hidden settings and a Rion plan based on Ultimate Performance (High performance or the active plan if unavailable). Its AC and battery idle timers keep the display and PC awake.
 
 **Game settings editor**
 - Valorant and Fortnite settings in plain dropdowns: resolution, window mode, FPS caps, NVIDIA Reflex, AMD Anti-Lag 2, quality levels and more.
 - When a setting lives in more than one file, every copy is updated together. Valorant keeps its settings in RiotUserSettings.ini and GameUserSettings.ini.
 - Finds the right Valorant account folder on its own.
 - Run as administrator and Disable fullscreen optimizations for the game exe.
-- Backup before every save, and one-click undo.
+- Backup before every save, and one-click undo. Saves preserve encoding, spacing and line endings; undo also removes files created by that save.
 
 **Cleanup and fixes**
 - Temp files, update caches, error reports, driver leftovers, shader caches and launcher web caches.
@@ -64,13 +64,13 @@ To run the script directly, open PowerShell in the repository folder and run:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\RionTool.ps1
 ```
 
-Add `-Cleanup` to run the recommended cleanup without opening the window. It still asks for administrator rights, and the cleanup output appears in the new elevated window.
+Add `-Cleanup` to run the recommended cleanup without opening the window. It still asks for administrator rights, and the cleanup output appears in the new elevated window. When Rion opens that window through UAC, press Enter after reading the results to close it.
 
 ## Undoing changes
 
-- Unticking an applied setting restores the value it had before.
+- Unticking a setting changed by Rion restores its saved original value. Settings with no saved original are left alone.
 - Original values are saved to `C:\ProgramData\RionTool` the first time a setting is changed.
-- Fixes > Undo Rion Tool changes reverts everything at once.
+- Fixes > Undo Rion Tool changes restores recorded system settings. Use the Games tab undo button for game configuration backups.
 - Create a restore point first with the button on the Home tab.
 
 ## Good to know
@@ -78,7 +78,11 @@ Add `-Cleanup` to run the recommended cleanup without opening the window. It sti
 - Microsoft Defender: Windows 11 blocks changes to the Defender services, even for administrators. The Defender option writes the official policies. They only take effect once Tamper Protection is off.
 - Game settings must be changed while the game is closed, because games write their settings back when they exit.
 - Most driver app settings (AMD Software, Intel Graphics Software) can't be set safely from outside those apps. The NVIDIA tab applies the main NVIDIA 3D settings through NVIDIA Profile Inspector, and the Games tab sets Valorant and Fortnite options. See [docs/Driver-Settings-Guide.md](docs/Driver-Settings-Guide.md) for the rest.
-- NVIDIA profile options use NVIDIA Profile Inspector. The tool links to the official release page and never bundles it.
+- NVIDIA tab: choose **Performance**, **Fortnite Potato**, or **Restore Defaults**, then **Apply profile**. The three bundled `.nip` files supply the settings; Fortnite is routed to the profile the driver associates with `FortniteClient-Win64-Shipping.exe`. Imports use merge mode and are verified afterward. Restore Defaults resets the settings in the supplied defaults file; an exact previous configuration requires the exported backup.
+- Download [NVIDIA Profile Inspector 3.0.1.14 or newer](https://github.com/Orbmu2k/nvidiaProfileInspector/releases) and extract it beside `RionTool.ps1`. It is not bundled. Import stops if the backup export fails. Generated profiles go under `C:\ProgramData\RionTool\nvidia`; repository originals are kept intact.
+- Home > Shortcuts and automation opens the bundled Microsoft Sysinternals `Autoruns.exe` after Windows validates its Microsoft signature.
+- Fixes > Gaming and anti-cheat > **Repair Xbox app and services (Microsoft Gaming Repair Tool + reinstall)** runs the bundled Microsoft-signed `GamingRepairTool.exe`, then repairs/reinstalls Xbox, Game Bar, Gaming Services and Xbox Identity Provider. If the executable is absent, untrusted or fails, package repair still runs. WinGet and internet access are needed for package downloads.
+- Install or reapply **Rion's power plan** in the Power tab to update an existing copy. New copies use Ultimate Performance, falling back to High performance or the active plan when Windows does not expose those templates. Reapplying preserves every processor setting in an existing Rion plan. Display (including lock screen), sleep, hibernate and unattended sleep idle timers are set to Never on AC and battery where Windows exposes them. Manual sleep, lid/power buttons, critical-battery protection, managed policy and screen savers remain separate. Keeping a laptop awake drains its battery; measured performance depends on the hardware.
 
 ## Screenshots
 
@@ -86,4 +90,17 @@ Add `-Cleanup` to run the recommended cleanup without opening the window. It sti
 
 ## Disclaimer
 
-This tool changes system settings. Every change can be undone, but you use it at your own risk. Create a restore point before large changes.
+This tool changes system settings. Cleanup permanently deletes files. Removed apps may need reinstallation, and drive decryption must be reversed manually with a recovery-key plan. Some older undo records lack enough information for automatic restoration. You use the tool at your own risk. Create a restore point before large changes.
+
+## Development checks
+
+Run the isolated regression checks from the repository folder:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Regression.Tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Integration.Tests.ps1
+```
+
+Startup shares service, task, adapter and power snapshots across detection workers instead of scanning those sources four times. Health scans run in the background.
+
+The checks parse the application and use mocked Windows operations and temporary game files. They do not launch the app or change system settings. WPF and native Windows behavior still need verification on Windows.
