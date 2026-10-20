@@ -27,6 +27,8 @@ Made for Windows 11 (Windows 10 works for most features). Needs Windows PowerShe
 
 **Hardware-aware pages**
 - AMD, NVIDIA and Intel tabs only show up on PCs with that hardware.
+- AMD tab: the AMD Software settings, read live from the driver. Radeon Anti-Lag, Chill, Boost, Image Sharpening, Enhanced Sync, VSync, frame rate target, anti-aliasing, anisotropic filtering, tessellation, FreeSync, VSR, GPU scaling, color depth, pixel format, GPU clocks, voltage, VRAM clock and timing, power and TDC limit, Smart Access Memory, Zero RPM and fan curve. Live GPU clocks, temperatures, board power and fan RPM. GPU and fan tuning changes undo themselves after 15 seconds unless you keep them.
+- NVIDIA tab: the main NVIDIA Control Panel 3D settings (Low Latency Mode, power management, texture filtering, VSync, max frame rate, shader cache and more) written straight to the driver's global profile.
 - Network adapter settings match the driver you have: Intel, Realtek, Killer, Qualcomm, MediaTek and Broadcom Ethernet and Wi-Fi.
 - Power plan editor with hidden settings and a Rion plan based on Ultimate Performance (High performance or the active plan if unavailable). Its AC and battery idle timers keep the display and PC awake.
 
@@ -77,7 +79,7 @@ Add `-Cleanup` to run the recommended cleanup without opening the window. It sti
 
 - Microsoft Defender: Windows 11 blocks changes to the Defender services, even for administrators. The Defender option writes the official policies. They only take effect once Tamper Protection is off.
 - Game settings must be changed while the game is closed, because games write their settings back when they exit.
-- Most driver app settings (AMD Software, Intel Graphics Software) can't be set safely from outside those apps. The NVIDIA tab applies the main NVIDIA 3D settings through NVIDIA Profile Inspector, and the Games tab sets Valorant and Fortnite options. See [docs/Driver-Settings-Guide.md](docs/Driver-Settings-Guide.md) for the rest.
+- AMD Software and NVIDIA 3D settings are changed through the drivers' own interfaces (AMD ADLX and NVIDIA NVAPI), so the AMD and NVIDIA apps show the same values. Rows only appear for settings your GPU and driver support. NVIDIA overclocking and fan control are not offered: NVIDIA does not publish an interface for them. Intel Graphics Software settings still have to be changed in that app. See [docs/Driver-Settings-Guide.md](docs/Driver-Settings-Guide.md) for the rest.
 - NVIDIA tab: choose **Performance**, **Fortnite Potato**, or **Restore Defaults**, then **Apply profile**. The three bundled `.nip` files supply the settings; Fortnite is routed to the profile the driver associates with `FortniteClient-Win64-Shipping.exe`. Imports use merge mode and are verified afterward. Restore Defaults resets the settings in the supplied defaults file; an exact previous configuration requires the exported backup.
 - Download [NVIDIA Profile Inspector 3.0.1.14 or newer](https://github.com/Orbmu2k/nvidiaProfileInspector/releases) and extract it beside `RionTool.ps1`. It is not bundled. Import stops if the backup export fails. Generated profiles go under `C:\ProgramData\RionTool\nvidia`; repository originals are kept intact.
 - Home > Shortcuts and automation opens the bundled Microsoft Sysinternals `Autoruns.exe` after Windows validates its Microsoft signature.
