@@ -5457,7 +5457,9 @@ function Invoke-GamingRepair {
             $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '' }
             if ($sig.Status -eq 'Valid' -and $signer -match '(?:^|,\s*)CN=Microsoft Corporation(?:,|$)') {
                 Write-Log 'Running Microsoft Gaming Repair Tool...' 'Action'
-                $repairProcess = Start-Process -FilePath $exe -Wait -PassThru -ErrorAction Stop
+                $repairProcess = Start-Process -FilePath $exe -PassThru -ErrorAction Stop
+                [void]$repairProcess.Handle
+                while (-not $repairProcess.WaitForExit(100)) { Update-UiNow 'Waiting for Microsoft Gaming Repair Tool to close...' }
                 if ($repairProcess.ExitCode -ne 0) { Write-Log ("Microsoft Gaming Repair Tool returned exit {0}; continuing with Xbox package repair." -f $repairProcess.ExitCode) 'Warn' }
             } else { Write-Log ("Gaming Repair Tool not trusted (status: {0}, signer: {1}); using package repair." -f $sig.Status,$signer) 'Warn' }
         } catch { Write-Log ("Gaming Repair Tool could not run: {0}; using package repair." -f $_.Exception.Message) 'Warn' }
