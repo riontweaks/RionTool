@@ -3018,8 +3018,7 @@ $script:AdlxDefs = @(
     @{ Id='amd.gfx.aalevel'; Group='Radeon graphics'; Label='Anti-Aliasing level'; Svc='3d'; Slot=10; Arg=1; Type='enum'; Sup=3; Get=5; Set=8; Values=([ordered]@{ '2X'=2; '2X EQ'=3; '4X'=4; '4X EQ'=5; '8X'=8; '8X EQ'=9 }); Parent='amd.gfx.aamode'; ParentOn=2; Risk='Safe'; LowerFps=$true; Info='Sample count when the driver overrides anti-aliasing. Higher costs more FPS. Only used when Anti-Aliasing is set to override.' }
     @{ Id='amd.gfx.aamethod'; Group='Radeon graphics'; Label='Anti-Aliasing method'; Svc='3d'; Slot=10; Arg=1; Type='enum'; Sup=3; Get=6; Set=9; Values=([ordered]@{ 'Multisampling'=0; 'Adaptive multisampling'=1; 'Supersampling'=2 }); Risk='Safe'; LowerFps=$true; Info='How driver anti-aliasing samples the image. Supersampling looks best and costs the most FPS.' }
     @{ Id='amd.gfx.mlaa'; Group='Radeon graphics'; Label='Morphological Anti-Aliasing'; Svc='3d'; Slot=11; Arg=1; Type='bool'; Sup=3; Get=4; Set=5; Risk='Safe'; Warn='Blurs text and UI slightly.'; Info='Post-process edge smoothing for games without their own anti-aliasing. Small FPS cost.' }
-    @{ Id='amd.gfx.af'; Group='Radeon graphics'; Label='Anisotropic Filtering'; Svc='3d'; Slot=12; Arg=1; Type='bool'; Sup=3; Get=4; Set=6; Risk='Safe'; Info='Makes textures at an angle sharper in older games. Modern games set this themselves.' }
-    @{ Id='amd.gfx.aflevel'; Group='Radeon graphics'; Label='Anisotropic Filtering level'; Svc='3d'; Slot=12; Arg=1; Type='enum'; Sup=3; Get=5; Set=7; Values=([ordered]@{ '2X'=2; '4X'=4; '8X'=8; '16X'=16 }); Parent='amd.gfx.af'; ParentOn=1; Risk='Safe'; Info='Filtering strength while driver Anisotropic Filtering is on. 16X costs almost nothing on current GPUs.' }
+    @{ Id='amd.gfx.af'; Group='Radeon graphics'; Label='Anisotropic Filtering'; Svc='3d'; Slot=12; Arg=1; Type='enum'; Combined='af'; Sup=3; Get=5; Set=7; Values=([ordered]@{ 'Off'=0; '2X'=2; '4X'=4; '8X'=8; '16X'=16 }); Risk='Safe'; Info='Makes textures at an angle sharper in older games. Modern games set this themselves; 16X costs almost nothing on current GPUs.' }
     @{ Id='amd.gfx.tessmode'; Group='Radeon graphics'; Label='Tessellation mode'; Svc='3d'; Slot=13; Arg=1; Type='enum'; Sup=3; Get=4; Set=6; Values=([ordered]@{ 'AMD optimized'=0; 'Use application settings'=1; 'Override application settings'=2 }); Risk='Safe'; Info='How much geometry detail the driver allows. Override with a low level can raise FPS in older games at the cost of detail.' }
     @{ Id='amd.gfx.tesslevel'; Group='Radeon graphics'; Label='Maximum tessellation level'; Svc='3d'; Slot=13; Arg=1; Type='enum'; Sup=3; Get=5; Set=7; Values=([ordered]@{ 'Off'=1; '2X'=2; '4X'=4; '6X'=6; '8X'=8; '16X'=16; '32X'=32; '64X'=64 }); Risk='Safe'; Info='Cap used when Tessellation mode is Override application settings.' }
     @{ Id='amd.gfx.rsr'; Group='Radeon graphics'; Label='Radeon Super Resolution'; Svc='3d'; Slot=14; Arg=0; Type='bool'; Sup=3; Get=4; Set=5; Risk='Moderate'; Warn='Only works in exclusive fullscreen at a lower resolution; the desktop may flicker when it turns on.'; Info='Driver upscaling for games without FSR. Set the game to a lower resolution in fullscreen and RSR scales it up.' }
@@ -3069,6 +3068,7 @@ function Get-AdlxRaw {
     $o = Get-AdlxFeature $Def
     switch ($Def.Type) {
         'bool' { return [int][RionAdlx]::GetBool($o,[int]$Def.Get) }
+        { $Def.Combined -eq 'af' } { if (-not [RionAdlx]::GetBool($o,4)) { return 0 }; return [RionAdlx]::GetInt($o,[int]$Def.Get) }
         'curve' { return (@([RionAdlx]::GetFanCurve($o)) -join ',') }
         'preset' { foreach ($n in $Def.Presets.Keys) { if ([RionAdlx]::GetBool($o,[int]$Def.Presets[$n][1])) { return $n } }; return '' }
         default { return [RionAdlx]::GetInt($o,[int]$Def.Get) }
@@ -3079,6 +3079,7 @@ function Set-AdlxRawDirect {
     $o = Get-AdlxFeature $Def
     switch ($Def.Type) {
         'bool' { [RionAdlx]::SetBool($o,[int]$Def.Set,([int]$Value -ne 0)) }
+        { $Def.Combined -eq 'af' } { if ([int]$Value -eq 0) { [RionAdlx]::SetBool($o,6,$false) } else { [RionAdlx]::SetBool($o,6,$true); if ([int]$Value -ne 1) { [RionAdlx]::SetInt($o,[int]$Def.Set,[int]$Value) } } }
         'curve' { [RionAdlx]::SetFanCurve($o,[int[]]@(([string]$Value) -split ',' | ForEach-Object { [int]$_ })) }
         'preset' { if (-not $Def.Presets.Contains([string]$Value)) { throw ("Unknown tuning preset {0}." -f $Value) }; [RionAdlx]::Invoke($o,[int]$Def.Presets[[string]$Value][2]) }
         default { [RionAdlx]::SetInt($o,[int]$Def.Set,[int]$Value) }
@@ -3253,6 +3254,7 @@ if (Initialize-Adlx) {
 }
 $script:RionNvapiSource = @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class RionNvapi {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryExW(string name, IntPtr file, uint flags);
@@ -3264,25 +3266,35 @@ public static class RionNvapi {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int HOutHFn(IntPtr s, out IntPtr p);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int GetFn(IntPtr s, IntPtr p, uint id, IntPtr setting);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int SetFn(IntPtr s, IntPtr p, IntPtr setting);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int SetExFn(IntPtr s, IntPtr p, IntPtr setting, uint a, uint b);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int DelFn(IntPtr s, IntPtr p, uint id);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int EnumFn([Out] IntPtr[] handles, out uint count);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int EnumGpuFn([Out] IntPtr[] handles, out uint count);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int NameFn(IntPtr gpu, IntPtr name);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int ProfileInfoFn(IntPtr s, IntPtr p, IntPtr info);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int EnumProfileFn(IntPtr s, uint index, out IntPtr p);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int CountFn(IntPtr s, out uint n);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int DriverFn(out uint version, IntPtr branch);
     public const int SettingSize = 12320;
     public const uint SettingVersion = 12320u | (1u << 16);
     public const int OffId = 4100, OffType = 4104, OffLocation = 4108, OffCurrent = 8220;
-    const uint IdInitialize = 0x0150E828, IdEnumGpus = 0xE5AC921F, IdGpuName = 0xCEEE8E9F, IdCreateSession = 0x0694D52E, IdDestroySession = 0xDAD9CFF8, IdLoadSettings = 0x375DBD6B, IdSaveSettings = 0xFCBC7E14, IdGlobalProfile = 0x617BFF9F, IdGetSetting = 0x73BF8338, IdSetSetting = 0x577DD202, IdDeleteSetting = 0xE4A26362;
+    public const int ProfileSize = 4116;
+    public const uint ProfileVersion = 4116u | (1u << 16);
+    public const int TypeDword = 0, TypeQword = 4;
+    const uint IdInitialize = 0x0150E828, IdEnumGpus = 0xE5AC921F, IdGpuName = 0xCEEE8E9F, IdDriver = 0x2926AAAD, IdCreateSession = 0x0694D52E, IdDestroySession = 0xDAD9CFF8, IdLoadSettings = 0x375DBD6B, IdSaveSettings = 0xFCBC7E14, IdGlobalProfile = 0x617BFF9F, IdBaseProfile = 0xDA8466A0, IdProfileInfo = 0x61CD6FD6, IdEnumProfiles = 0xBC371EE0, IdNumProfiles = 0x1DAE4FBC, IdGetSetting = 0x73BF8338, IdSetSetting = 0x577DD202, IdSetSettingEx = 0x8A2CF5F5, IdDeleteSetting = 0xE4A26362, IdDeleteSettingEx = 0xD20D29DF;
     static readonly object Gate = new object();
     static IntPtr lib;
     static QueryFn query;
     static bool ready;
     public static string GpuName = "";
     public static string LastError = "";
+    public static string LastWritePath = "";
     public static bool Ready { get { return ready; } }
     static T Fn<T>(uint id) where T : class {
         IntPtr f = query(id);
         if (f == IntPtr.Zero) { throw new InvalidOperationException("NVAPI function 0x" + id.ToString("X8") + " is not available in this driver."); }
         return (T)(object)Marshal.GetDelegateForFunctionPointer(f, typeof(T));
     }
+    static bool Has(uint id) { return query != null && query(id) != IntPtr.Zero; }
     public static string StatusName(int r) {
         switch (r) {
             case 0: return "OK";
@@ -3313,7 +3325,7 @@ public static class RionNvapi {
                 Check(Fn<VoidFn>(IdInitialize)(), "NVAPI start");
                 try {
                     IntPtr[] h = new IntPtr[64]; uint n;
-                    if (Fn<EnumFn>(IdEnumGpus)(h, out n) == 0 && n > 0) {
+                    if (Fn<EnumGpuFn>(IdEnumGpus)(h, out n) == 0 && n > 0) {
                         IntPtr buf = Marshal.AllocHGlobal(64);
                         try { Marshal.Copy(new byte[64], 0, buf, 64); if (Fn<NameFn>(IdGpuName)(h[0], buf) == 0) { GpuName = Marshal.PtrToStringAnsi(buf); } }
                         finally { Marshal.FreeHGlobal(buf); }
@@ -3325,87 +3337,178 @@ public static class RionNvapi {
             } catch (Exception e) { LastError = e.Message; return false; }
         }
     }
-    static IntPtr Open(out IntPtr profile) {
+    public static string DriverVersion() {
+        lock (Gate) {
+            if (!ready || !Has(IdDriver)) { return ""; }
+            IntPtr buf = Marshal.AllocHGlobal(64);
+            try {
+                Marshal.Copy(new byte[64], 0, buf, 64);
+                uint v;
+                if (Fn<DriverFn>(IdDriver)(out v, buf) != 0) { return ""; }
+                return (v / 100) + "." + (v % 100).ToString("00") + " (" + Marshal.PtrToStringAnsi(buf) + ")";
+            } finally { Marshal.FreeHGlobal(buf); }
+        }
+    }
+    static IntPtr Open() {
         IntPtr s;
         Check(Fn<OutHFn>(IdCreateSession)(out s), "Driver settings session");
-        try {
-            Check(Fn<HFn>(IdLoadSettings)(s), "Load driver settings");
-            Check(Fn<HOutHFn>(IdGlobalProfile)(s, out profile), "Global profile");
-            return s;
-        } catch { try { Fn<HFn>(IdDestroySession)(s); } catch { } throw; }
+        try { Check(Fn<HFn>(IdLoadSettings)(s), "Load driver settings"); return s; }
+        catch { try { Fn<HFn>(IdDestroySession)(s); } catch { } throw; }
     }
     static void Close(IntPtr s) { try { Fn<HFn>(IdDestroySession)(s); } catch { } }
+    static IntPtr Global(IntPtr s) { IntPtr p; Check(Fn<HOutHFn>(IdGlobalProfile)(s, out p), "Global profile"); return p; }
+    static IntPtr[] Targets(IntPtr s) {
+        IntPtr g = Global(s);
+        IntPtr b = IntPtr.Zero;
+        try { if (Fn<HOutHFn>(IdBaseProfile)(s, out b) != 0) { b = IntPtr.Zero; } } catch { b = IntPtr.Zero; }
+        if (b == IntPtr.Zero || b == g) { return new IntPtr[] { g }; }
+        return new IntPtr[] { g, b };
+    }
     static IntPtr NewSetting() {
         IntPtr buf = Marshal.AllocHGlobal(SettingSize);
-        Marshal.Copy(new byte[SettingSize], 0, buf, SettingSize);
-        Marshal.WriteInt32(buf, 0, unchecked((int)SettingVersion));
+        Clear(buf);
         return buf;
     }
-    static long[] ReadOne(IntPtr s, IntPtr p, uint id, IntPtr buf) {
+    static void Clear(IntPtr buf) {
         Marshal.Copy(new byte[SettingSize], 0, buf, SettingSize);
         Marshal.WriteInt32(buf, 0, unchecked((int)SettingVersion));
-        int r = Fn<GetFn>(IdGetSetting)(s, p, id, buf);
-        if (r == -160) { return new long[] { 0, -1 }; }
-        Check(r, "Read setting 0x" + id.ToString("X8"));
-        if (Marshal.ReadInt32(buf, OffType) != 0) { throw new InvalidOperationException("Setting 0x" + id.ToString("X8") + " is not a number setting."); }
-        uint loc = unchecked((uint)Marshal.ReadInt32(buf, OffLocation));
-        uint val = unchecked((uint)Marshal.ReadInt32(buf, OffCurrent));
-        return new long[] { loc == 0 ? 1 : 0, val };
     }
-    public static long[] Get(uint id) { return GetMany(new uint[] { id }); }
+    static int Read(IntPtr s, IntPtr p, uint id, IntPtr buf) {
+        Clear(buf);
+        return Fn<GetFn>(IdGetSetting)(s, p, id, buf);
+    }
+    static long ValueOf(IntPtr buf, int type) {
+        if (type == TypeQword) { return Marshal.ReadInt64(buf, OffCurrent); }
+        return unchecked((uint)Marshal.ReadInt32(buf, OffCurrent));
+    }
     public static long[] GetMany(uint[] ids) {
         lock (Gate) {
             if (!ready) { throw new InvalidOperationException("NVAPI is not started."); }
-            IntPtr p; IntPtr s = Open(out p); IntPtr buf = NewSetting();
+            IntPtr s = Open(); IntPtr buf = NewSetting();
             try {
-                long[] r = new long[ids.Length * 2];
-                for (int i = 0; i < ids.Length; i++) { long[] one = ReadOne(s, p, ids[i], buf); r[i * 2] = one[0]; r[i * 2 + 1] = one[1]; }
+                IntPtr p = Global(s);
+                long[] r = new long[ids.Length * 3];
+                for (int i = 0; i < ids.Length; i++) {
+                    int res = Read(s, p, ids[i], buf);
+                    if (res == -160) { r[i * 3] = -1; r[i * 3 + 1] = -1; r[i * 3 + 2] = -1; continue; }
+                    if (res != 0) { r[i * 3] = -2; r[i * 3 + 1] = res; r[i * 3 + 2] = -1; continue; }
+                    int type = Marshal.ReadInt32(buf, OffType);
+                    if (type != TypeDword && type != TypeQword) { r[i * 3] = -3; r[i * 3 + 1] = type; r[i * 3 + 2] = type; continue; }
+                    r[i * 3] = Marshal.ReadInt32(buf, OffLocation) == 0 ? 1 : 0;
+                    r[i * 3 + 1] = ValueOf(buf, type);
+                    r[i * 3 + 2] = type;
+                }
                 return r;
             } finally { Marshal.FreeHGlobal(buf); Close(s); }
         }
     }
-    public static void Set(uint id, uint value) {
+    static void WriteOne(IntPtr s, IntPtr p, uint id, long value, IntPtr buf) {
+        int type = TypeDword;
+        if (Read(s, p, id, buf) == 0 && Marshal.ReadInt32(buf, OffType) == TypeQword) { type = TypeQword; }
+        Clear(buf);
+        Marshal.WriteInt32(buf, OffId, unchecked((int)id));
+        Marshal.WriteInt32(buf, OffType, type);
+        if (type == TypeQword) { Marshal.WriteInt64(buf, OffCurrent, value); } else { Marshal.WriteInt32(buf, OffCurrent, unchecked((int)(uint)value)); }
+        int r = Fn<SetFn>(IdSetSetting)(s, p, buf);
+        if (r != 0 && Has(IdSetSettingEx)) {
+            int r2 = Fn<SetExFn>(IdSetSettingEx)(s, p, buf, 0, 0);
+            if (r2 == 0) { LastWritePath = "internal"; return; }
+        }
+        Check(r, "Change setting 0x" + id.ToString("X8"));
+        LastWritePath = "public";
+    }
+    static void DeleteOne(IntPtr s, IntPtr p, uint id) {
+        int r = Fn<DelFn>(IdDeleteSetting)(s, p, id);
+        if (r != 0 && r != -160 && Has(IdDeleteSettingEx)) { r = Fn<DelFn>(IdDeleteSettingEx)(s, p, id); }
+        if (r != 0 && r != -160) { Check(r, "Reset setting 0x" + id.ToString("X8")); }
+    }
+    public static void Apply(uint[] ids, long[] values, bool[] keep) {
         lock (Gate) {
             if (!ready) { throw new InvalidOperationException("NVAPI is not started."); }
-            IntPtr p; IntPtr s = Open(out p); IntPtr buf = NewSetting();
+            if (ids.Length != values.Length || ids.Length != keep.Length) { throw new ArgumentException("Setting lists do not match."); }
+            IntPtr s = Open(); IntPtr buf = NewSetting();
             try {
-                Marshal.WriteInt32(buf, OffId, unchecked((int)id));
-                Marshal.WriteInt32(buf, OffType, 0);
-                Marshal.WriteInt32(buf, OffCurrent, unchecked((int)value));
-                Check(Fn<SetFn>(IdSetSetting)(s, p, buf), "Change setting 0x" + id.ToString("X8"));
+                foreach (IntPtr p in Targets(s)) {
+                    for (int i = 0; i < ids.Length; i++) {
+                        if (keep[i]) { WriteOne(s, p, ids[i], values[i], buf); } else { DeleteOne(s, p, ids[i]); }
+                    }
+                }
                 Check(Fn<HFn>(IdSaveSettings)(s), "Save driver settings");
             } finally { Marshal.FreeHGlobal(buf); Close(s); }
         }
     }
-    public static void Delete(uint id) {
+    static string ProfileName(IntPtr s, IntPtr p) {
+        IntPtr buf = Marshal.AllocHGlobal(ProfileSize);
+        try {
+            Marshal.Copy(new byte[ProfileSize], 0, buf, ProfileSize);
+            Marshal.WriteInt32(buf, 0, unchecked((int)ProfileVersion));
+            if (Fn<ProfileInfoFn>(IdProfileInfo)(s, p, buf) != 0) { return "?"; }
+            return Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
+        } finally { Marshal.FreeHGlobal(buf); }
+    }
+    public static string Profiles() {
+        lock (Gate) {
+            if (!ready) { return ""; }
+            IntPtr s = Open();
+            try {
+                IntPtr[] t = Targets(s);
+                string g = ProfileName(s, t[0]);
+                return t.Length > 1 ? ("current global profile '" + g + "', base profile '" + ProfileName(s, t[1]) + "' (both are written)") : ("global profile '" + g + "' (same as the base profile)");
+            } finally { Close(s); }
+        }
+    }
+    public static int[] CountOverrides(uint[] ids) {
         lock (Gate) {
             if (!ready) { throw new InvalidOperationException("NVAPI is not started."); }
-            IntPtr p; IntPtr s = Open(out p);
+            IntPtr s = Open(); IntPtr buf = NewSetting();
             try {
-                int r = Fn<DelFn>(IdDeleteSetting)(s, p, id);
-                if (r != 0 && r != -160) { Check(r, "Reset setting 0x" + id.ToString("X8")); }
-                Check(Fn<HFn>(IdSaveSettings)(s), "Save driver settings");
-            } finally { Close(s); }
+                int[] counts = new int[ids.Length];
+                List<IntPtr> skip = new List<IntPtr>(Targets(s));
+                uint n;
+                Check(Fn<CountFn>(IdNumProfiles)(s, out n), "Count profiles");
+                for (uint i = 0; i < n; i++) {
+                    IntPtr p;
+                    if (Fn<EnumProfileFn>(IdEnumProfiles)(s, i, out p) != 0) { continue; }
+                    if (skip.Contains(p)) { continue; }
+                    for (int k = 0; k < ids.Length; k++) {
+                        if (Read(s, p, ids[k], buf) == 0 && Marshal.ReadInt32(buf, OffLocation) == 0) { counts[k]++; }
+                    }
+                }
+                return counts;
+            } finally { Marshal.FreeHGlobal(buf); Close(s); }
         }
     }
 }
 '@
+$script:NvFps = @(20,30,40,48,60,72,75,90,100,120,144,165,170,180,200,240,280,300,360)
+$script:NvBgFps = @(5,10,15,20,30,40,60)
 $script:NvDefs = @(
-    @{ Id='nv.drs.lowlatency'; Label='Low Latency Mode'; Setting=0x007BA09E; Values=([ordered]@{ 'Off'=0; 'On'=1 }); Risk='Safe'; Info='Limits how many frames the CPU prepares ahead of the GPU. On lowers input lag when the GPU is the bottleneck. Games with NVIDIA Reflex ignore it and use Reflex instead.' }
-    @{ Id='nv.drs.power'; Label='Power management mode'; Setting=0x1057EB71; Values=([ordered]@{ 'Normal'=5; 'Adaptive'=0; 'Prefer maximum performance'=1; 'Prefer consistent performance'=3 }); Risk='Moderate'; Warn='Prefer maximum performance keeps the GPU clocked up at idle, raising power draw and heat.'; Info='How fast the GPU clocks down. Prefer maximum performance avoids clock drops in light games; Normal is right for most PCs.' }
-    @{ Id='nv.drs.texquality'; Label='Texture filtering - Quality'; Setting=0x00CE2691; Values=([ordered]@{ 'High quality'=4294967286; 'Quality'=0; 'Performance'=10; 'High performance'=20 }); Risk='Safe'; Info='Trades texture filtering quality for speed. On current GPUs Performance and High performance gain almost nothing; High quality costs about 1%.' }
-    @{ Id='nv.drs.vsync'; Label='Vertical sync'; Setting=0x00A879CF; Values=([ordered]@{ 'Use the 3D application setting'=0x60925292; 'Off'=0x08416747; 'On'=0x47814940; 'Fast'=0x18888888 }); Risk='Safe'; Info='Driver VSync. With G-SYNC, On here plus an FPS cap a few frames below the refresh rate gives no tearing with low lag. Fast removes tearing above the refresh rate.' }
-    @{ Id='nv.drs.maxfps'; Label='Max frame rate'; Setting=0x10835002; Pick='fps'; Risk='Moderate'; LowerFps=$true; Warn='Caps FPS at the chosen value in every game.'; Info='Driver frame rate cap for all games. An in-game cap or Reflex usually gives lower lag; use this for games without a cap.' }
-    @{ Id='nv.drs.threaded'; Label='Threaded optimization'; Setting=0x20C1221E; Values=([ordered]@{ 'Auto'=0; 'On'=1; 'Off'=2 }); Risk='Safe'; Info='Lets OpenGL games use more CPU threads. Auto is best; Off can fix stutter in a few old OpenGL games.' }
-    @{ Id='nv.drs.triple'; Label='Triple buffering'; Setting=0x20FDD1F9; Values=([ordered]@{ 'Off'=0; 'On'=1 }); Risk='Safe'; Info='OpenGL only. Smooths VSync frame drops at the cost of a frame of lag.' }
-    @{ Id='nv.drs.neglod'; Label='Texture filtering - Negative LOD bias'; Setting=0x0019BB68; Values=([ordered]@{ 'Allow'=0; 'Clamp'=1 }); Risk='Safe'; Info='Clamp stops games from over-sharpening distant textures, which removes shimmer in some older games.' }
-    @{ Id='nv.drs.anisoopt'; Label='Texture filtering - Anisotropic sample optimization'; Setting=0x00E73211; Values=([ordered]@{ 'Off'=0; 'On'=1 }); Risk='Safe'; Info='Uses fewer samples for anisotropic filtering. A tiny speed gain with slightly blurrier textures at an angle.' }
-    @{ Id='nv.drs.fxaa'; Label='FXAA'; Setting=0x1074C972; Values=([ordered]@{ 'Off'=0; 'On'=1 }); Risk='Safe'; Warn='Blurs text and UI slightly.'; Info='Driver post-process anti-aliasing for games without their own. Small FPS cost.' }
-    @{ Id='nv.drs.shadercache'; Label='Shader cache size'; Setting=0x00AC8497; Values=([ordered]@{ '1 GB'=1024; '5 GB'=5120; '10 GB'=10240; '100 GB'=102400; 'Unlimited'=4294967295 }); Risk='Safe'; Info='How much disk space the driver may use for compiled shaders. A larger cache means fewer shader-compile stutters after a game update.' }
+    @{ Id='nv.drs.lowlatency'; Group='NVIDIA 3D settings'; Label='Low Latency Mode'; Keys=@(0x0005F543,0x10835000,0x007BA09E); Defaults=@(0,0,0); Values=([ordered]@{ 'Off'=@(0,0,0); 'On'=@(1,0,1); 'Ultra'=@(2,1,1) }); Risk='Safe'; Info='Limits how many frames the CPU prepares ahead of the GPU. On queues one frame; Ultra also submits frames just in time. Lowers input lag when the GPU is the bottleneck. Games with NVIDIA Reflex use Reflex instead. Writes the same three driver keys as NVIDIA Control Panel (Low Latency state, Ultra Low Latency and maximum pre-rendered frames).' }
+    @{ Id='nv.drs.power'; Group='NVIDIA 3D settings'; Label='Power management mode'; Keys=@(0x1057EB71); Defaults=@(5); Values=([ordered]@{ 'Normal'=@(5); 'Adaptive'=@(0); 'Prefer maximum performance'=@(1) }); Risk='Moderate'; Warn='Prefer maximum performance keeps the GPU clocked up at idle, raising power draw and heat.'; Info='How fast the GPU clocks down. Prefer maximum performance avoids clock drops in light games; Normal is right for most PCs.' }
+    @{ Id='nv.drs.texquality'; Group='NVIDIA 3D settings'; Label='Texture filtering - Quality'; Keys=@(0x00CE2691); Defaults=@(0); Values=([ordered]@{ 'High quality'=@(4294967286); 'Quality'=@(0); 'Performance'=@(10); 'High performance'=@(20) }); Risk='Safe'; Info='Trades texture filtering quality for speed. On current GPUs Performance and High performance gain almost nothing; High quality costs about 1%.' }
+    @{ Id='nv.drs.trilinear'; Group='NVIDIA 3D settings'; Label='Texture filtering - Trilinear optimization'; Keys=@(0x002ECAF2); Defaults=@(0); Values=([ordered]@{ 'On'=@(0); 'Off'=@(1) }); Risk='Safe'; Info='Uses cheaper filtering between texture mip levels. Ignored when Texture filtering - Quality is High quality.' }
+    @{ Id='nv.drs.anisofilteropt'; Group='NVIDIA 3D settings'; Label='Texture filtering - Anisotropic filter optimization'; Keys=@(0x0084CD70); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'On'=@(1) }); Risk='Safe'; Info='Uses bilinear instead of trilinear filtering inside anisotropic filtering. A tiny speed gain with slightly blurrier textures.' }
+    @{ Id='nv.drs.anisoopt'; Group='NVIDIA 3D settings'; Label='Texture filtering - Anisotropic sample optimization'; Keys=@(0x00E73211); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'On'=@(1) }); Risk='Safe'; Info='Uses fewer samples for anisotropic filtering. A tiny speed gain with slightly blurrier textures at an angle.' }
+    @{ Id='nv.drs.neglod'; Group='NVIDIA 3D settings'; Label='Texture filtering - Negative LOD bias'; Keys=@(0x0019BB68); Defaults=@(0); Values=([ordered]@{ 'Allow'=@(0); 'Clamp'=@(1) }); Risk='Safe'; Info='Clamp stops games from over-sharpening distant textures, which removes shimmer in some older games.' }
+    @{ Id='nv.drs.aniso'; Group='NVIDIA 3D settings'; Label='Anisotropic filtering'; Keys=@(0x10D2BB16,0x101E61A9); Defaults=@(0,1); Values=([ordered]@{ 'Application-controlled'=@(0,1); 'Off'=@(1,1); '2x'=@(1,2); '4x'=@(1,4); '8x'=@(1,8); '16x'=@(1,16) }); Risk='Safe'; Info='Forces anisotropic filtering in every game. Modern games set it themselves; forcing 16x sharpens textures in older games at almost no cost.' }
+    @{ Id='nv.drs.vsync'; Group='NVIDIA 3D settings'; Label='Vertical sync'; Keys=@(0x00A879CF); Defaults=@(0x60925292); Values=([ordered]@{ 'Use the 3D application setting'=@(0x60925292); 'Off'=@(0x08416747); 'On'=@(0x47814940); 'Fast'=@(0x18888888) }); Risk='Safe'; Info='Driver VSync. With G-SYNC, On here plus an FPS cap a few frames below the refresh rate gives no tearing with low lag. Fast removes tearing above the refresh rate.' }
+    @{ Id='nv.drs.maxfps'; Group='NVIDIA 3D settings'; Label='Max frame rate'; Keys=@(0x10835002); Defaults=@(0); Fps=$script:NvFps; Risk='Moderate'; LowerFps=$true; Warn='Caps FPS at the chosen value in every game.'; Info='Driver frame rate cap for all games. An in-game cap or Reflex usually gives lower lag; use this for games without a cap.' }
+    @{ Id='nv.drs.bgfps'; Group='NVIDIA 3D settings'; Label='Background application max frame rate'; Keys=@(0x10835005); Defaults=@(0); Fps=$script:NvBgFps; Risk='Safe'; Info='Caps the frame rate of games that are not in focus, for example while you alt-tab, to save power and heat.' }
+    @{ Id='nv.drs.threaded'; Group='NVIDIA 3D settings'; Label='Threaded optimization'; Keys=@(0x20C1221E); Defaults=@(0); Values=([ordered]@{ 'Auto'=@(0); 'On'=@(1); 'Off'=@(2) }); Risk='Safe'; Info='Lets OpenGL games use more CPU threads. Auto is best; Off can fix stutter in a few old OpenGL games.' }
+    @{ Id='nv.drs.triple'; Group='NVIDIA 3D settings'; Label='Triple buffering'; Keys=@(0x20FDD1F9); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'On'=@(1) }); Risk='Safe'; Info='OpenGL only. Smooths VSync frame drops at the cost of a frame of lag.' }
+    @{ Id='nv.drs.fxaa'; Group='NVIDIA 3D settings'; Label='FXAA'; Keys=@(0x1074C972); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'On'=@(1) }); Risk='Safe'; Warn='Blurs text and UI slightly.'; Info='Driver post-process anti-aliasing for games without their own. Small FPS cost.' }
+    @{ Id='nv.drs.shadercache'; Group='NVIDIA 3D settings'; Label='Shader cache size'; Keys=@(0x00AC8497); Defaults=@(0x4000); Values=([ordered]@{ 'Off'=@(0); '128 MB'=@(0x80); '256 MB'=@(0x100); '512 MB'=@(0x200); '1 GB'=@(0x400); '4 GB'=@(0x1000); '5 GB'=@(0x1400); '8 GB'=@(0x2000); '10 GB'=@(0x2800); '16 GB'=@(0x4000); '100 GB'=@(0x19000); 'Unlimited'=@(4294967295) }); Risk='Safe'; Warn='Off makes every game compile its shaders again at each launch.'; Info='How much disk space the driver may use for compiled shaders. A larger cache means fewer shader-compile stutters after a game update.' }
+    @{ Id='nv.drs.cudasysmem'; Group='NVIDIA 3D settings'; Label='CUDA - Sysmem fallback policy'; Keys=@(0x10ECECC9); Defaults=@(0); Values=([ordered]@{ 'Driver default'=@(0); 'Prefer no sysmem fallback'=@(1); 'Prefer sysmem fallback'=@(2) }); Risk='Safe'; Info='What CUDA apps (AI tools, renderers) do when VRAM runs out. Prefer no sysmem fallback stops the big slowdown of spilling into system RAM, but the app may fail with an out-of-memory error instead.' }
+    @{ Id='nv.drs.smoothmotion'; Group='NVIDIA DLSS and frame generation'; Label='Smooth Motion'; Keys=@(0xB0D384C0); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'On'=@(1) }); Risk='Moderate'; Warn='Adds input lag and can show artifacts in fast motion.'; Info='Driver frame generation for DirectX 11 and 12 games without DLSS Frame Generation. Needs a GeForce RTX 40 or 50 series GPU and a recent driver; best above 60 base FPS.' }
+    @{ Id='nv.drs.dlsssr'; Group='NVIDIA DLSS and frame generation'; Label='DLSS Super Resolution override'; Keys=@(0x10E41E01); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'Use latest DLSS'=@(1) }); Risk='Safe'; Info='Makes DLSS 2 and newer games use the newest DLSS Super Resolution version the driver has. A few games block the override.' }
+    @{ Id='nv.drs.dlssrr'; Group='NVIDIA DLSS and frame generation'; Label='DLSS Ray Reconstruction override'; Keys=@(0x10E41E02); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'Use latest DLSS'=@(1) }); Risk='Safe'; Info='Makes games with DLSS Ray Reconstruction use the newest version the driver has.' }
+    @{ Id='nv.drs.dlssfg'; Group='NVIDIA DLSS and frame generation'; Label='DLSS Frame Generation override'; Keys=@(0x10E41E03); Defaults=@(0); Values=([ordered]@{ 'Off'=@(0); 'Use latest DLSS'=@(1) }); Risk='Safe'; Info='Makes games with DLSS Frame Generation use the newest version the driver has. Needs an RTX 40 or 50 series GPU.' }
+    @{ Id='nv.drs.dlsspreset'; Group='NVIDIA DLSS and frame generation'; Label='DLSS Super Resolution preset'; Keys=@(0x10E41DF3,0x00634291); Defaults=@(0,0); Values=([ordered]@{ 'Game default'=@(0,0); 'Preset E (CNN)'=@(5,2); 'Preset J (transformer)'=@(10,2); 'Preset K (transformer)'=@(11,2); 'Preset L (transformer 2)'=@(12,2); 'Preset M (transformer 2)'=@(13,2) }); Risk='Safe'; Info='Forces a DLSS model in every game. Transformer presets look sharper and cost a little more GPU time. Works best with DLSS Super Resolution override on; drivers that do not know a preset ignore it.' }
 )
 $script:NvIndex = @{}
 foreach ($d in $script:NvDefs) { $script:NvIndex[$d.Id] = $d }
 $script:NvRowIds = @()
+function ConvertTo-NvId { param($Value) return [uint32]([long]$Value -band [long]4294967295) }
 function Initialize-Nvapi {
     if ($script:NvapiFailed) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\nvapi64.dll'))) { return $false }
@@ -3417,71 +3520,135 @@ function Initialize-Nvapi {
     $script:NvapiFailed = $true
     return $false
 }
-function Format-NvValue {
-    param($Def,[long]$Raw)
-    if ($Raw -lt 0) { return 'Driver default' }
-    if ($Def.Pick -eq 'fps') { if ($Raw -eq 0) { return 'Off' }; return ('{0} FPS' -f $Raw) }
-    foreach ($k in $Def.Values.Keys) { if ([long]$Def.Values[$k] -eq $Raw) { return $k } }
-    return ('Driver value {0}' -f $Raw)
-}
-function Get-NvOptions {
+function Get-NvChoices {
     param($Def)
-    $labels = if ($Def.Pick -eq 'fps') { @('Off') + @($script:AdlxFps | ForEach-Object { '{0} FPS' -f $_ }) } else { @($Def.Values.Keys) }
-    return @('Default') + @($labels)
+    if ($Def.Fps) {
+        $map = [ordered]@{ 'Off'=@(0) }
+        foreach ($f in $Def.Fps) { $map[('{0} FPS' -f $f)] = @([long]$f) }
+        return $map
+    }
+    return $Def.Values
 }
-function ConvertFrom-NvChoice {
-    param($Def,[string]$Choice)
-    if ($Def.Pick -eq 'fps') { if ($Choice -eq 'Off') { return [long]0 }; $m = [regex]::Match($Choice,'^\d+'); if ($m.Success) { return [long]$m.Value } }
-    elseif ($Def.Values.Contains($Choice)) { return [long]$Def.Values[$Choice] }
-    throw ("'{0}' is not a value Rion Tool can set for {1}." -f $Choice,$Def.Label)
+function Get-NvState {
+    param($Def)
+    $r = @([RionNvapi]::GetMany([uint32[]]@($Def.Keys | ForEach-Object { (ConvertTo-NvId $_) })))
+    $keys = for ($i = 0; $i -lt $Def.Keys.Count; $i++) {
+        $status = [long]$r[$i * 3]
+        if ($status -le -2) { throw ("{0}: the driver could not read setting 0x{1:X8} ({2})." -f $Def.Label,(ConvertTo-NvId $Def.Keys[$i]),$(if ($status -eq -2) { [RionNvapi]::StatusName([int]$r[$i * 3 + 1]) } else { 'unsupported value type ' + $r[$i * 3 + 1] })) }
+        @{ Set=($status -eq 1); Found=($status -ge 0); Value=$(if ($status -ge 0) { [long]$r[$i * 3 + 1] } else { [long]$Def.Defaults[$i] }) }
+    }
+    return @($keys)
 }
-function Get-NvState { param($Def) $r = @([RionNvapi]::Get([uint32]$Def.Setting)); return @{ Exists=([long]$r[0] -eq 1); Value=[long]$r[1] } }
+function Format-NvValue {
+    param($Def,$State)
+    $vals = @($State | ForEach-Object { [long]$_.Value })
+    $choices = Get-NvChoices $Def
+    foreach ($k in $choices.Keys) { $want = @($choices[$k]); $all = $true; for ($i = 0; $i -lt $want.Count; $i++) { if ([long]$want[$i] -ne $vals[$i]) { $all = $false } }; if ($all) { return $k } }
+    foreach ($k in $choices.Keys) { if ([long]@($choices[$k])[0] -eq $vals[0]) { return $k } }
+    if ($Def.Fps) { return ('{0} FPS' -f $vals[0]) }
+    return ('Custom (0x{0:X8})' -f [uint32]($vals[0] -band 0xFFFFFFFF))
+}
+function Get-NvOptions { param($Def) return @('Default') + @((Get-NvChoices $Def).Keys) }
+function Set-NvValues {
+    param($Def,[long[]]$Values,[bool[]]$Keep)
+    [RionNvapi]::Apply([uint32[]]@($Def.Keys | ForEach-Object { (ConvertTo-NvId $_) }),[long[]]$Values,[bool[]]$Keep)
+    $now = @(Get-NvState $Def)
+    for ($i = 0; $i -lt $Def.Keys.Count; $i++) {
+        $expect = if ($Keep[$i]) { [long]$Values[$i] } else { $null }
+        if ($Keep[$i] -and ($now[$i].Value -ne $expect -or -not $now[$i].Set)) { throw ("{0}: setting 0x{1:X8} reads back as {2} instead of {3} after saving." -f $Def.Label,(ConvertTo-NvId $Def.Keys[$i]),$now[$i].Value,$expect) }
+        if (-not $Keep[$i] -and $now[$i].Set) { throw ("{0}: setting 0x{1:X8} is still set after resetting it." -f $Def.Label,(ConvertTo-NvId $Def.Keys[$i])) }
+    }
+}
 function Set-NvChoice {
     param([string]$Id,[string]$Choice)
     $def = $script:NvIndex[$Id]
     if (-not $def) { throw ("Unknown NVIDIA setting {0}." -f $Id) }
     if (-not (Initialize-Nvapi)) { throw 'The NVIDIA driver (NVAPI) is not available, so the setting was not changed.' }
-    $value = ConvertFrom-NvChoice $def $Choice
-    try { [RionNvapi]::Set([uint32]$def.Setting,[uint32]$value) } catch { throw ("{0}: {1}" -f $def.Label,(Get-AdlxError $_)) }
-    $now = Get-NvState $def
-    if ($now.Value -ne $value) { throw ("{0} did not change: the driver still reports {1}." -f $def.Label,(Format-NvValue $def $now.Value)) }
-    Write-Log ("{0} set to {1} in the NVIDIA global profile." -f $def.Label,$Choice) 'Success'
+    $choices = Get-NvChoices $def
+    if (-not $choices.Contains($Choice)) { throw ("'{0}' is not a value Rion Tool can set for {1}." -f $Choice,$def.Label) }
+    $values = [long[]]@($choices[$Choice] | ForEach-Object { [long]$_ })
+    try { Set-NvValues $def $values ([bool[]]@($values | ForEach-Object { $true })) } catch { throw ("{0}: {1}" -f $def.Label,(Get-AdlxError $_)) }
+    Write-Log ("{0} set to {1} in the NVIDIA global profile and verified by reading it back." -f $def.Label,$Choice) 'Success'
 }
 function Get-NvRecord {
     param([string]$Id)
     $def = $script:NvIndex[$Id]
     if (-not $def -or -not (Initialize-Nvapi)) { return $null }
-    $st = Get-NvState $def
-    return @{ kind='nvdrs'; path=$Id; name='value'; existed=[bool]$st.Exists; value=[string]$st.Value; gpu=[RionNvapi]::GpuName }
+    $st = @(Get-NvState $def)
+    return @{ kind='nvdrs'; path=$Id; name='value'; existed=@($st | ForEach-Object { [bool]$_.Set }); value=@($st | ForEach-Object { [string]$_.Value }); gpu=[RionNvapi]::GpuName }
 }
 function Restore-NvRecord {
     param($Record)
     $def = $script:NvIndex[[string]$Record.path]
     if (-not $def) { Write-Log ("Skipped an NVIDIA setting Rion Tool no longer knows: {0}" -f $Record.path) 'Warn'; return }
     if (-not (Initialize-Nvapi)) { throw 'The NVIDIA driver (NVAPI) is not available, so the original value could not be restored.' }
-    try {
-        if ($Record.existed) { [RionNvapi]::Set([uint32]$def.Setting,[uint32][long]$Record.value) } else { [RionNvapi]::Delete([uint32]$def.Setting) }
-    } catch { throw ("{0}: {1}" -f $def.Label,(Get-AdlxError $_)) }
+    $existed = @($Record.existed); $values = @($Record.value)
+    if ($existed.Count -ne $def.Keys.Count) { $existed = @($def.Keys | ForEach-Object { $false }); $existed[0] = [bool]@($Record.existed)[0]; $values = @($def.Keys | ForEach-Object { '0' }); $values[0] = [string]@($Record.value)[0] }
+    try { Set-NvValues $def ([long[]]@($values | ForEach-Object { [long]$_ })) ([bool[]]@($existed | ForEach-Object { [bool]$_ })) } catch { throw ("{0}: {1}" -f $def.Label,(Get-AdlxError $_)) }
     Write-Log ("{0} restored in the NVIDIA global profile." -f $def.Label) 'Success'
 }
 function Update-NvRows {
-    if (-not $script:NvRowIds.Count -or $script:ApplyRun -or -not ('RionNvapi' -as [type]) -or -not [RionNvapi]::Ready) { return }
-    $defs = @($script:NvRowIds | ForEach-Object { $script:NvIndex[$_] })
-    try { $vals = @([RionNvapi]::GetMany([uint32[]]@($defs | ForEach-Object { [uint32]$_.Setting }))) } catch { return }
-    for ($i = 0; $i -lt $defs.Count; $i++) {
-        $e = $script:Rows[$defs[$i].Id]
+    if (-not $script:NvRowIds.Count -or -not $script:Rows -or $script:ApplyRun -or -not ('RionNvapi' -as [type]) -or -not [RionNvapi]::Ready) { return }
+    foreach ($id in $script:NvRowIds) {
+        $e = $script:Rows[$id]
         if (-not $e -or -not $e.Combo -or $e.Touched -or $e.Combo.IsDropDownOpen) { continue }
-        $label = Format-NvValue $defs[$i] ([long]$vals[$i * 2 + 1])
+        try { $label = Format-NvValue $script:NvIndex[$id] @(Get-NvState $script:NvIndex[$id]) } catch { $label = 'Not readable' }
         if (-not $e.Combo.Items.Contains($label)) { [void]$e.Combo.Items.Add($label) }
         if ([string]$e.Combo.SelectedItem -ne $label) { $e.Combo.SelectedItem = $label }
         $e.Touched = $false
     }
 }
+function Invoke-NvSelfTest {
+    if (-not (Initialize-Nvapi)) { throw 'The NVIDIA driver (NVAPI) is not available.' }
+    if ($script:ApplyRun) { throw 'Wait for the current Apply to finish.' }
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add(('Rion Tool NVIDIA settings test, {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')))
+    [void]$lines.Add(('GPU: {0}; driver {1}' -f [RionNvapi]::GpuName,[RionNvapi]::DriverVersion()))
+    [void]$lines.Add(('Writes go to the {0}.' -f [RionNvapi]::Profiles()))
+    $pass = 0; $fail = 0
+    foreach ($id in $script:NvRowIds) {
+        $def = $script:NvIndex[$id]
+        [void]$lines.Add('')
+        [void]$lines.Add(('{0} ({1})' -f $def.Label,(@($def.Keys | ForEach-Object { '0x{0:X8}' -f (ConvertTo-NvId $_) }) -join ', ')))
+        try { $orig = Get-NvRecord $id } catch { [void]$lines.Add(('  FAIL could not read the current value: {0}' -f (Get-AdlxError $_))); $fail++; continue }
+        try {
+            [void]$lines.Add(('  before: {0}' -f (Format-NvValue $def @(Get-NvState $def))))
+            $choices = Get-NvChoices $def
+            foreach ($label in @($choices.Keys)) {
+                $vals = [long[]]@($choices[$label] | ForEach-Object { [long]$_ })
+                try {
+                    Set-NvValues $def $vals ([bool[]]@($vals | ForEach-Object { $true }))
+                    $shown = Format-NvValue $def @(Get-NvState $def)
+                    if ($shown -ne $label) { throw ("reads back as '{0}'" -f $shown) }
+                    [void]$lines.Add(('  PASS {0}' -f $label)); $pass++
+                } catch { [void]$lines.Add(('  FAIL {0}: {1}' -f $label,(Get-AdlxError $_))); $fail++ }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } finally {
+            try { Restore-NvRecord $orig; [void]$lines.Add(('  restored: {0}' -f (Format-NvValue $def @(Get-NvState $def)))) } catch { [void]$lines.Add(('  FAIL restoring the original value: {0}' -f (Get-AdlxError $_))); $fail++ }
+        }
+    }
+    try {
+        $all = @($script:NvRowIds | ForEach-Object { $script:NvIndex[$_] })
+        $ids = [uint32[]]@($all | ForEach-Object { (ConvertTo-NvId $_.Keys[0]) })
+        $counts = @([RionNvapi]::CountOverrides($ids))
+        [void]$lines.Add('')
+        [void]$lines.Add('Game profiles with their own value (these override the global setting in those games):')
+        for ($i = 0; $i -lt $all.Count; $i++) { if ($counts[$i]) { [void]$lines.Add(('  {0}: {1} game profile(s)' -f $all[$i].Label,$counts[$i])) } }
+    } catch { [void]$lines.Add(('Could not count game profile overrides: {0}' -f (Get-AdlxError $_))) }
+    [void]$lines.Add('')
+    [void]$lines.Add(('Result: {0} value(s) passed, {1} failed. Close and reopen NVIDIA Control Panel or the NVIDIA app to see changes.' -f $pass,$fail))
+    $file = Join-Path $script:DataDir ('nvidia-test-{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Set-Content -LiteralPath $file -Value @($lines) -Encoding UTF8
+    Write-Log ('NVIDIA settings test: {0} passed, {1} failed. Report: {2}' -f $pass,$fail,$file) $(if ($fail) { 'Warn' } else { 'Success' })
+    Update-NvRows
+    return $file
+}
 if (Initialize-Nvapi) {
-    $nvSuffix = ' Changed in the NVIDIA global 3D profile through the NVIDIA driver (NVAPI){0}, the same place as NVIDIA Control Panel > Manage 3D settings. Default puts back the value from before Rion Tool changed it.' -f $(if ([RionNvapi]::GpuName) { ' on ' + [RionNvapi]::GpuName } else { '' })
+    $nvSuffix = ' Changed in the NVIDIA global profile through the NVIDIA driver (NVAPI){0}, the same place NVIDIA Control Panel and the NVIDIA app use, and read back to confirm. Default puts back the value from before Rion Tool changed it.' -f $(if ([RionNvapi]::GpuName) { ' on ' + [RionNvapi]::GpuName } else { '' })
     foreach ($d in $script:NvDefs) {
-        try { [void](Get-NvState $d) } catch { continue }
-        $script:Tweaks += (New-Tweak -Id $d.Id -Tab 'NVIDIA' -SubTab '' -Group 'NVIDIA 3D settings' -Label $d.Label -Risk $d.Risk -Type 'dropdown' -Options @(Get-NvOptions $d) -Detect $null -Info ([string]$d.Info + $nvSuffix) -Warn ([string]$d.Warn))
+        try { [void](Get-NvState $d) } catch { Write-Log ("NVIDIA row hidden: {0}" -f (Get-AdlxError $_)) 'Info'; continue }
+        $script:Tweaks += (New-Tweak -Id $d.Id -Tab 'NVIDIA' -SubTab '' -Group $d.Group -Label $d.Label -Risk $d.Risk -Type 'dropdown' -Options @(Get-NvOptions $d) -Detect $null -Info ([string]$d.Info + $nvSuffix) -Warn ([string]$d.Warn))
         $script:NvRowIds += $d.Id
         if ($d.LowerFps) { $script:LowerFpsIds += $d.Id }
     }
@@ -7112,9 +7279,66 @@ function New-AdlxStatusBox {
             Update-AdlxRows
         }
     }
+    $children += New-ActionRow -Label 'Test every AMD setting' -Info 'Sets every value of every AMD row one by one, reads each back from the driver, then puts your original values back. The screen blinks during the display tests. Writes a report of every value tested.' -Act {
+        if ([System.Windows.MessageBox]::Show('Rion Tool will set every value of every AMD row one at a time, check it, and then put your current values back. The screen blinks during the display tests and clocks and fans change for a moment. Do not run a game while it runs. Continue?','AMD settings test','OKCancel','Question') -ne 'OK') { return }
+        $f = Invoke-AdlxSelfTest
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'notepad.exe') -ArgumentList ('"{0}"' -f $f)
+    }
     return (New-SectionBox -Title 'Live GPU status (AMD Software)' -Children $children)
 }
-$script:VendorTabs = @{}
+function Invoke-AdlxSelfTest {
+    if (-not (Initialize-Adlx)) { throw 'AMD Software (ADLX) is not available.' }
+    if ($script:ApplyRun) { throw 'Wait for the current Apply to finish.' }
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add(('Rion Tool AMD settings test, {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')))
+    [void]$lines.Add(('GPU: {0}; display: {1}; ADLX {2:X}' -f [RionAdlx]::GpuName,[RionAdlx]::DisplayName,[RionAdlx]::Version))
+    $pass = 0; $fail = 0
+    foreach ($id in $script:AdlxRowIds) {
+        $def = $script:AdlxIndex[$id]
+        [void]$lines.Add('')
+        [void]$lines.Add([string]$def.Label)
+        if ($id -eq 'amd.tune.sam') { [void]$lines.Add('  SKIPPED: switching Smart Access Memory restarts the graphics driver. It uses the same On/Off path as the other rows.'); continue }
+        try { $orig = Get-AdlxRaw $def; $rec = Get-AdlxRecord $id; $before = Format-AdlxValue $def $orig } catch { [void]$lines.Add(('  FAIL could not read the current value: {0}' -f (Get-AdlxError $_))); $fail++; continue }
+        [void]$lines.Add(('  before: {0}' -f $before))
+        try {
+            foreach ($label in @(Get-AdlxOptions $def | Select-Object -Skip 1)) {
+                try { $v = ConvertFrom-AdlxChoice $def $label } catch { if ($label -eq $before) { [void]$lines.Add(('  KEPT {0} (your own value, not one of the listed choices)' -f $label)) } else { [void]$lines.Add(('  FAIL {0}: {1}' -f $label,(Get-AdlxError $_))); $fail++ }; continue }
+                try {
+                    Set-AdlxValue $def $v
+                    $shown = Format-AdlxValue $def (Get-AdlxRaw $def)
+                    if ($shown -ne $label) { throw ("reads back as '{0}'" -f $shown) }
+                    [void]$lines.Add(('  PASS {0}' -f $label)); $pass++
+                } catch { [void]$lines.Add(('  FAIL {0}: {1}' -f $label,(Get-AdlxError $_))); $fail++ }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } finally {
+            try {
+                if ($rec.unset) { [void]$lines.Add(('  original had no value, so it stays at {0}; it is not used while its parent setting is off' -f (Format-AdlxValue $def (Get-AdlxRaw $def)))) }
+                else { Set-AdlxValue $def $(if ($def.Type -in 'curve','preset') { [string]$orig } else { [int]$orig }); [void]$lines.Add(('  restored: {0}' -f (Format-AdlxValue $def (Get-AdlxRaw $def)))) }
+            } catch { [void]$lines.Add(('  FAIL restoring the original value: {0}' -f (Get-AdlxError $_))); $fail++ }
+        }
+    }
+    [void]$lines.Add('')
+    [void]$lines.Add(('Result: {0} value(s) passed, {1} failed.' -f $pass,$fail))
+    $file = Join-Path $script:DataDir ('amd-test-{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Set-Content -LiteralPath $file -Value @($lines) -Encoding UTF8
+    Write-Log ('AMD settings test: {0} passed, {1} failed. Report: {2}' -f $pass,$fail,$file) $(if ($fail) { 'Warn' } else { 'Success' })
+    Update-AdlxRows
+    return $file
+}
+function New-NvStatusBox {
+    $children = @()
+    $drv = [RionNvapi]::DriverVersion()
+    $prof = try { [RionNvapi]::Profiles() } catch { 'NVIDIA global profile' }
+    $children += New-HintText ('{0}{1}. Settings are read from the driver when this tab opens, every 10 seconds while it is open, and after Apply. Writes go to the {2}. Reopen NVIDIA Control Panel or the NVIDIA app to see changes there. A game profile with its own value overrides the global value in that game.' -f [RionNvapi]::GpuName,$(if ($drv) { ', driver ' + $drv } else { '' }),$prof)
+    $script:BuildingTab = 'NVIDIA'
+    $children += New-ActionRow -Label 'Test every NVIDIA setting' -Info 'Sets every value of every NVIDIA row one by one, reads each back from the driver, then puts your original values back. Writes a report with the driver version, the profiles written and how many game profiles override each setting.' -Act {
+        if ([System.Windows.MessageBox]::Show('Rion Tool will set every value of every NVIDIA row one at a time, check it, and then put your current values back. Do not run a game while it runs. Continue?','NVIDIA settings test','OKCancel','Question') -ne 'OK') { return }
+        $f = Invoke-NvSelfTest
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'notepad.exe') -ArgumentList ('"{0}"' -f $f)
+    }
+    return (New-SectionBox -Title 'NVIDIA driver (NVAPI)' -Children $children)
+}$script:VendorTabs = @{}
 foreach ($vtab in @('AMD','NVIDIA','Intel')) {
     $items = @($script:Tweaks | Where-Object { $_.Tab -eq $vtab })
     $panel = if ($items.Count) { New-TweakPanel $items } else { New-TwoColumnPanel @() }
@@ -7123,6 +7347,7 @@ foreach ($vtab in @('AMD','NVIDIA','Intel')) {
         try { $grid.Children[0].Children.Insert(0,$script:NvidiaFixBox) } catch { }
         foreach ($it in $script:SearchItems) { try { if ($it.Row.Parent.Parent -eq $script:NvidiaFixBox) { $it.Tab = 'NVIDIA' } } catch { } }
     }
+    if ($vtab -eq 'NVIDIA' -and $script:NvRowIds.Count) { try { $panel.Content.Children[0].Children.Insert(0,(New-NvStatusBox)) } catch { Write-Log ("Could not build the NVIDIA status panel: {0}" -f $_.Exception.Message) 'Warn' } }
     if ($vtab -eq 'AMD' -and $script:AdlxRowIds.Count) { try { $panel.Content.Children[0].Children.Insert(0,(New-AdlxStatusBox)) } catch { Write-Log ("Could not build the AMD status panel: {0}" -f $_.Exception.Message) 'Warn' } }
     $script:VendorTabs[$vtab] = Add-Tab $vtab $panel
 }
@@ -7143,6 +7368,8 @@ $script:AdlxTimer.Add_Tick({
     } catch { }
 })
 if ($script:AdlxRowIds.Count -or $script:NvRowIds.Count) { $script:AdlxTimer.Start() }
+try { Update-AdlxRows } catch { }
+try { Update-NvRows } catch { }
 function Update-VendorTabs {
     $vendors = @(@($script:Env.GpuVendors) + @([string]$script:Env.CpuVendor) | Where-Object { $_ })
     foreach ($v in @($script:VendorTabs.Keys)) { $script:VendorTabs[$v].Visibility = if (-not $vendors.Count -or $vendors -contains $v) { 'Visible' } else { 'Collapsed' } }
