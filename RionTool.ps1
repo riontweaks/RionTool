@@ -8258,10 +8258,13 @@ function Find-GameExe {
 }
 function Get-ValorantAccounts {
     $list = @()
-    if (-not (Test-Path -LiteralPath $script:ValRoot)) { return $list }
+    $script:GameSourceNote = ''
+    if (-not (Test-Path -LiteralPath $script:ValRoot)) { $script:GameSourceNote = ('Looked in {0}; that folder does not exist for Windows account {1}.' -f $script:ValRoot,[Environment]::UserName); return $list }
     $last = ''
     try { $m = Select-String -LiteralPath (Join-Path $script:ValRoot 'WindowsClient\RiotLocalMachine.ini') -Pattern '^LastKnownUser=(.+)$' -ErrorAction Stop | Select-Object -First 1; if ($m) { $last = $m.Matches[0].Groups[1].Value.Trim() } } catch { }
-    foreach ($d in @(Get-ChildItem -LiteralPath $script:ValRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'CrashReportClient','WindowsClient','Windows' })) {
+    try { $valDirs = @(Get-ChildItem -LiteralPath $script:ValRoot -Directory -Force -ErrorAction Stop | Where-Object { $_.Name -notin 'CrashReportClient','WindowsClient','Windows' }) } catch { $script:GameSourceNote = ('Could not read {0}: {1}' -f $script:ValRoot,$_.Exception.Message); return $list }
+    if (-not $valDirs.Count) { $script:GameSourceNote = ('{0} has no account folders.' -f $script:ValRoot) }
+    foreach ($d in $valDirs) {
         $riot = Join-Path $d.FullName 'Windows\RiotUserSettings.ini'
         $gus = Join-Path $d.FullName 'WindowsClient\GameUserSettings.ini'
         if (-not (Test-Path -LiteralPath $riot) -and -not (Test-Path -LiteralPath $gus)) { continue }
@@ -8274,7 +8277,8 @@ function Get-ValorantAccounts {
 }
 function Get-FortniteSources {
     $f = Join-Path $script:FnRoot 'GameUserSettings.ini'
-    if (-not (Test-Path -LiteralPath $f)) { return @() }
+    $script:GameSourceNote = ''
+    if (-not (Test-Path -LiteralPath $f)) { $script:GameSourceNote = ('Looked for {0}; it does not exist for Windows account {1}.' -f $f,[Environment]::UserName); return @() }
     return @([pscustomobject]@{ Name='GameUserSettings.ini'; Dir=$script:FnRoot; Files=@{ Gus=$f }; Changed=(Get-Item -LiteralPath $f).LastWriteTime; IsLast=$true })
 }
 function New-GameOpt { param([string]$Text,[hashtable]$Values) return @{ Text=$Text; Values=$Values } }
@@ -8405,7 +8409,8 @@ function Load-GameState {
     $src = if ($ui.Source.SelectedItem) { $ui.Source.SelectedItem.Tag } else { $null }
     if (-not $src) {
         $Game.State = $null
-        $ui.Status.Text = ('{0} settings not found. Start {0} once and change any setting so it creates its config files.' -f $Game.Title)
+        $ui.Status.Text = ('{0} settings not found. Start {0} once and change any setting so it creates its config files. {1}' -f $Game.Title,[string]$script:GameSourceNote)
+        Write-Log ('{0}: no settings found. {1} LOCALAPPDATA={2}; elevated={3}' -f $Game.Title,[string]$script:GameSourceNote,$env:LOCALAPPDATA,(Test-IsAdmin)) 'Warn'
         foreach ($r in $Game.Rows) { $r.Combo.IsEnabled = $false }
         return
     }
