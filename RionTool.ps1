@@ -2628,8 +2628,8 @@ foreach ($t in $script:Tweaks) { if ($t.Id -in 'svc.bg.do','svc.vendor.intel','n
 
 $msaLoss = 'Signs this PC out of all Microsoft account services: Store and Xbox / Game Pass (installs, sign-in, cloud saves), Outlook, Office sign-in and activation, OneDrive, Teams, Edge sync, Phone Link, Family Safety and Windows Backup. Work or school (Intune / Entra) enrollment stops. You cannot add or switch to a Microsoft account, and Windows sign-in with one only works with the password cached on this PC. Steam, Discord, Chrome and other non-Microsoft logins are unaffected.'
 $script:FeatureWarnings = [ordered]@{
-    'svc.feat.account'        = $msaLoss
-    'svc.feat.hello'          = 'PIN, face and fingerprint sign-in and passkeys saved in Windows Hello stop working. Know your account password first, or you can be locked out of Windows.'
+    'svc.feat.account'        = $msaLoss + ' Never part of a preset: Rion Tool refuses this row while any Windows account on this PC signs in with a Microsoft or work/school account.'
+    'svc.feat.hello'          = 'PIN, face and fingerprint sign-in and passkeys saved in Windows Hello stop working. On a PC set to only allow Windows Hello sign-in, the sign-in screen then shows only the wallpaper and no way to sign in. Never part of a preset: Rion Tool refuses this row while that option is on, a PIN, face or fingerprint is set up for any account, or an account signs in with a Microsoft or work/school account.'
     'svc.feat.bitlocker'      = 'Do not apply while BitLocker or device encryption is on: unlocking other encrypted drives, suspending BitLocker for BIOS updates and backing up the recovery key stop working, and EFS-encrypted files cannot be opened.'
     'svc.feat.backup'         = 'System image backups (Backup and Restore (Windows 7)), wbadmin and the Windows Backup app stop working. Restore points are not affected: they use the Volume Shadow Copy service, which Rion Tool never disables.'
     'sec.updates'             = 'Also stops Store and Xbox / Game Pass installs and updates, Defender definition updates through Windows Update, driver updates and the Check for updates button. Turn it back on before installing apps or a feature update.'
@@ -2638,7 +2638,7 @@ $script:FeatureWarnings = [ordered]@{
     'task.diag'               = 'Also turns off the Disk Diagnostic resolver, which is how Windows warns you that a drive is reporting a failure (SMART), and stops queued crash reports from being sent. Check drive health with your drive maker''s tool now and then.'
     'svc.feat.timezone'       = 'The time zone no longer follows you when you travel; with a wrong time zone, calendar entries and in-game event timers show the wrong hour.'
     'svc.net.hotspot'         = 'Settings > Mobile hotspot (sharing this PC''s internet with a phone or console) and cellular data on PCs with a SIM stop working.'
-    'svc.dev.smartcard'       = 'Smart cards, PIV security keys and virtual smart cards stop working for sign-in and document signing. FIDO2 security keys and passkeys are not affected.'
+    'svc.dev.smartcard'       = 'Smart cards, PIV security keys and virtual smart cards stop working for sign-in and document signing. FIDO2 security keys and passkeys are not affected. Rion Tool refuses this row while the Require smart card sign-in policy is on.'
     'svc.dev.sensors'         = 'Laptops and tablets lose auto-rotate and adaptive brightness.'
     'svc.feat.payments'       = 'NFC tap-to-pay and calls or texts on PCs with a cellular modem stop working.'
     'net.dns'                 = 'While a public DNS is set, names your router provides (router or NAS names), parental-control filtering done by your router, company or school DNS, and hotel or airport Wi-Fi sign-in pages can stop working.'
@@ -2664,6 +2664,64 @@ foreach ($t in $script:Tweaks) {
 foreach ($t in $script:Tweaks) {
     if ($t.Id -eq 'feat.opt.ie') { $t.Info = 'Removes the Internet Explorer 11 optional feature (the retired standalone browser).' }
     if ($t.Id -eq 'task.maintenance') { $t.Label = 'Disable the WinSAT hardware assessment task'; $t.Risk = 'Safe'; $t.Info = 'The Maintenance task folder holds only WinSAT, which benchmarks the CPU, memory, disk and graphics after hardware changes and stores the scores Windows uses to choose some desktop and media defaults. Windows automatic maintenance itself (updates, drive optimization, Defender scans) is not affected.' }
+}
+
+$script:SignInGuardIds = @('svc.feat.hello','svc.feat.account','svc.dev.smartcard')
+function Get-SignInAccountName {
+    param([string]$Sid)
+    $name = $Sid
+    try { $name = (New-Object Security.Principal.SecurityIdentifier $Sid).Translate([Security.Principal.NTAccount]).Value } catch { $name = $Sid }
+    return ([string]$name -split '\\')[-1]
+}
+function Get-SignInLockoutRisk {
+    $risk = @{ HelloOnly=$false; HelloUsers=@(); OnlineUsers=@(); SmartCardOnly=$false }
+    $risk.HelloOnly = ((Get-RegNumber 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device' 'DevicePasswordLessBuildVersion') -eq 2)
+    $risk.SmartCardOnly = ((Get-RegNumber 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'scforceoption') -eq 1)
+    $providers = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\'
+    $sids = @()
+    foreach ($g in '{D6886603-9D2F-4EB2-B667-1971041FA96B}','{BEC09223-B018-416D-A0AC-523971B639F5}','{8AF662BF-65A0-4D0A-A540-A338A999D36F}') {
+        try { $sids += @(Get-ChildItem -LiteralPath ($providers + $g) -ErrorAction Stop | Where-Object { $_.PSChildName -like 'S-1-*' } | ForEach-Object { $_.PSChildName }) } catch { }
+    }
+    $risk.HelloUsers = @($sids | Select-Object -Unique | ForEach-Object { Get-SignInAccountName $_ } | Select-Object -Unique)
+    $online = @()
+    try { $online += @(Get-LocalUser -ErrorAction Stop | Where-Object { $_.Enabled -and [string]$_.PrincipalSource -in 'MicrosoftAccount','AzureAD' } | ForEach-Object { [string]$_.Name }) } catch { }
+    try {
+        foreach ($c in @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache' -ErrorAction Stop)) {
+            foreach ($i in @(Get-ChildItem -LiteralPath (Join-Path $c.PSPath 'IdentityCache') -ErrorAction SilentlyContinue)) {
+                $p = Get-ItemProperty -LiteralPath $i.PSPath -ErrorAction SilentlyContinue
+                if ($p -and [string]$p.UserName -like '*@*') { $online += (Get-SignInAccountName $i.PSChildName) }
+            }
+        }
+    } catch { }
+    $risk.OnlineUsers = @($online | ForEach-Object { ([string]$_ -split '\\')[-1] } | Where-Object { $_ } | Select-Object -Unique)
+    return $risk
+}
+function Get-SignInGuardReason {
+    param($Node,$Risk)
+    if (-not $Node -or -not $Node.TargetApplied -or -not $Node.Tweak) { return '' }
+    $id = [string]$Node.Tweak.Id
+    if ($script:SignInGuardIds -notcontains $id) { return '' }
+    if (-not $Risk) { $Risk = Get-SignInLockoutRisk }
+    $why = @()
+    if ($id -eq 'svc.feat.hello') {
+        if ($Risk.HelloOnly) { $why += 'the "only allow Windows Hello sign-in" option is on, which hides the password box at sign-in' }
+        if (@($Risk.HelloUsers).Count) { $why += ('a Windows Hello PIN, face or fingerprint is set up for {0}' -f (@($Risk.HelloUsers) -join ', ')) }
+    }
+    if ($id -in 'svc.feat.hello','svc.feat.account' -and @($Risk.OnlineUsers).Count) { $why += ('{0} signs in with a Microsoft or work/school account' -f (@($Risk.OnlineUsers) -join ', ')) }
+    if ($id -eq 'svc.dev.smartcard' -and $Risk.SmartCardOnly) { $why += 'the "Interactive logon: Require smart card" policy is on' }
+    return ($why -join '; ')
+}
+function Show-SignInGuardMessage {
+    param($Nodes)
+    $risk = Get-SignInLockoutRisk
+    $lines = @(foreach ($n in @($Nodes)) { ('- {0}: {1}.' -f $n.Tweak.Label,(Get-SignInGuardReason $n $risk)) })
+    foreach ($l in $lines) { Write-Log ('Sign-in protection: not applied {0}' -f $l.TrimStart('- ')) 'Warn' }
+    $steps = @('Open Settings > Accounts > Sign-in options and turn off "For improved security, only allow Windows Hello sign-in for Microsoft accounts on this device".','Make sure you know the password of every account on this PC: sign out, pick Sign-in options > Password (the key icon) and sign in with it.','Remove the PIN, face and fingerprint under Sign-in options, and switch Microsoft accounts to a local account (Settings > Accounts > Your info).')
+    if (@($Nodes | Where-Object { $_.Tweak.Id -eq 'svc.dev.smartcard' }).Count) { $steps += 'Turn off the "Interactive logon: Require smart card" policy (secpol.msc > Local Policies > Security Options).' }
+    $steps += 'Restart once and check that you can sign in with the password, then apply the row again.'
+    $n = 0
+    $msg = "Rion Tool did not apply the rows below. On this PC they can leave the sign-in screen with only the wallpaper and no way to sign in after a restart.`r`n`r`n" + ($lines -join "`r`n") + "`r`n`r`nTo use them safely:`r`n" + (@($steps | ForEach-Object { $n++; ('{0}. {1}' -f $n,$_) }) -join "`r`n") + "`r`n`r`nOpen Sign-in options now?"
+    if ([System.Windows.MessageBox]::Show($msg,'Sign-in protection','YesNo','Warning') -eq 'Yes') { try { Start-Process 'ms-settings:signinoptions' } catch { Write-Log ('Could not open Sign-in options: {0}' -f $_.Exception.Message) 'Warn' } }
 }
 
 $script:LowerFpsIds = @('gpu.mpo','cpu.ppm.idle','cpu.ppm.idledepth','cpu.parking')
@@ -3433,7 +3491,7 @@ $script:VendorTabMap = @{
     'svc.vendor.intel'=@('Intel','Intel services'); 'svc.vendor.intellms'=@('Intel','Intel services'); 'svc.vendor.inteldsa'=@('Intel','Intel services'); 'gpu.intel.todo'=@('Intel','Intel Graphics Software')
 }
 foreach ($t in $script:Tweaks) { $m = $script:VendorTabMap[$t.Id]; if ($m) { $t.Tab = $m[0]; $t.SubTab = ''; $t.Group = $m[1] } }
-$script:GuardedServices = @('KeyIso','CryptSvc','VaultSvc','SamSs','ProfSvc','gpsvc','UserManager','TokenBroker','TBS','VSS','swprv','TrustedInstaller','ClipSVC','sppsvc','LicenseManager','AppXSvc','StateRepository','Winmgmt','EventLog','RpcSs','Schedule','BrokerInfrastructure','CoreMessagingRegistrar','Power','PlugPlay','GoogleChromeElevationService','MicrosoftEdgeElevationService','BraveElevationService')
+$script:GuardedServices = @('KeyIso','CryptSvc','VaultSvc','SamSs','ProfSvc','gpsvc','UserManager','TokenBroker','TBS','VSS','swprv','TrustedInstaller','ClipSVC','sppsvc','LicenseManager','AppXSvc','StateRepository','Winmgmt','EventLog','RpcSs','Schedule','BrokerInfrastructure','CoreMessagingRegistrar','SystemEventsBroker','TimeBrokerSvc','DispBrokerDesktopSvc','TextInputManagementService','LSM','Power','PlugPlay','GoogleChromeElevationService','MicrosoftEdgeElevationService','BraveElevationService')
 foreach ($t in $script:Tweaks) {
     $blocked = @($t.Apply | Where-Object { $_.kind -eq 'service' -and $script:GuardedServices -contains [string]$_.name })
     if (-not $blocked.Count) { continue }
@@ -5785,7 +5843,7 @@ function Reset-ProcessorPowerDefaults {
 }
 
 function Repair-SignInServices {
-    $defaults = [ordered]@{ wlidsvc='Manual'; TokenBroker='Manual'; NgcSvc='Manual'; NgcCtnrSvc='Manual'; KeyIso='Manual'; VaultSvc='Manual'; CryptSvc='Automatic'; GoogleChromeElevationService='Manual'; MicrosoftEdgeElevationService='Manual'; BraveElevationService='Manual' }
+    $defaults = [ordered]@{ wlidsvc='Manual'; TokenBroker='Manual'; NgcSvc='Manual'; NgcCtnrSvc='Manual'; WbioSrvc='Manual'; KeyIso='Manual'; VaultSvc='Manual'; CryptSvc='Automatic'; GoogleChromeElevationService='Manual'; MicrosoftEdgeElevationService='Manual'; BraveElevationService='Manual' }
     $changed = @()
     foreach ($name in $defaults.Keys) {
         $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
@@ -6562,6 +6620,12 @@ $script:HealthChecks = @(
     } }
     @{ Category='Risky settings'; Run={
         $off = @(@('wlidsvc','Microsoft account sign-in'),@('NgcSvc','Windows Hello PIN and passkeys'),@('TokenBroker','Web Account Manager (Office, Teams, Edge sign-in)') | Where-Object { (Get-ServiceStartValue $_[0]) -eq 4 } | ForEach-Object { $_[1] })
+        $helloOff = @('NgcSvc','NgcCtnrSvc','WbioSrvc','wlidsvc' | Where-Object { (Get-ServiceStartValue $_) -eq 4 })
+        if ($helloOff.Count) {
+            $risk = Get-SignInLockoutRisk
+            $lock = @(@(foreach ($id in 'svc.feat.hello','svc.feat.account') { Get-SignInGuardReason @{ Tweak=@{ Id=$id }; TargetApplied=$true } $risk }) | Where-Object { $_ })
+            if ($lock.Count) { New-HealthFinding 'Risky settings' 'bad' 15 'Windows sign-in can fail after the next restart' ('Disabled: ' + ($helloOff -join ', ') + ', while ' + ($lock -join '; ') + '. The sign-in screen can show only the wallpaper. Repair the services before restarting.') 'Repair sign-in services' { Repair-SignInServices } }
+        }
         if ($off.Count) { New-HealthFinding 'Risky settings' 'warn' 5 'Sign-in services are disabled' ('Disabled: ' + ($off -join ', ') + '. Microsoft Store, Xbox, Office, OneDrive and Windows Hello sign-in break while these are off.') 'Repair sign-in services' { Repair-SignInServices } }
         if ((Get-ServiceStartValue 'CryptSvc') -in 3,4) { New-HealthFinding 'Risky settings' 'warn' 3 'Cryptographic Services is not set to Automatic' 'Certificate checks, Windows Update signatures and app installs depend on it.' 'Repair sign-in services' { Repair-SignInServices } }
     } }
@@ -6818,7 +6882,7 @@ $fixDefs = @(
     @{ Group='Reset tuning to Windows defaults'; Label='Clear all placebo tweaks'; Info='Runs the Placebo tweaks part of the system analysis and resets everything it finds to the Windows defaults, whatever tool set it: BCD timer overrides, HPET disabled, MMCSS values, memory manager keys, input buffer sizes, TRIM off, page file off, prefetch off, CPU side-channel overrides, forced priorities on Windows processes, svchost grouping, QoS, DNS cache, IRQ priority and Nagle values. Shows the list first and creates a restore point.'; Act={ Clear-PlaceboTweaks } }
     @{ Group='Reset tuning to Windows defaults'; Label='Reset CPU scheduling and multimedia scheduler values to Windows defaults'; Info='Restores the Windows foreground boost (Win32PrioritySeparation 0x26), turns background power throttling (EcoQoS) back on, and repairs multimedia scheduler values left by older Rion Tool builds or other tweak tools. Fixed quanta without a foreground boost and EcoQoS off both let background apps compete with games for CPU time and power. Values reset: NetworkThrottlingIndex 10, SystemResponsiveness 20, the Games task back to Priority 2 / GPU Priority 8 / Medium scheduling / Normal I/O, and removes the undocumented NoLazyMode, AlwaysOn and LazyModeTimeout values. Restart to apply.'; Act={ Reset-MmcssDefaults } }
     @{ Group='Reset tuning to Windows defaults'; Label='Reset processor idle, core parking, minimum state and EPP to Windows defaults'; Info='Sets processor idle disable, core parking minimum and maximum cores, minimum processor state and energy performance preference on the active power plan back to the defaults of the Windows plan it is based on (Balanced: idle on, 5% minimum, EPP 33 on AC). Ryzen Precision Boost raises the busy cores highest when idle cores can sleep, so idle disabled, unparked cores pinned at 100% and EPP 0 can lower game clocks. High performance and Ultimate Performance keep their own 100% minimum. Other power plan values are not changed.'; Act={ Reset-ProcessorPowerDefaults } }
-    @{ Group='Repair Windows'; Label='Repair sign-in and credential services'; Info='Sets the services that keep you signed in back to their Windows defaults: Microsoft account sign-in (wlidsvc) and Web Account Manager (TokenBroker), Windows Hello PIN and passkeys (NgcSvc, NgcCtnrSvc), key isolation (KeyIso), Credential Manager (VaultSvc), Cryptographic Services (CryptSvc), and the Chrome, Edge and Brave elevation services that unlock browser cookie and password encryption. Use it when Microsoft apps, Windows Hello or a browser keep signing you out. It does not bring back logins that were already lost; sign in again afterwards. Restart required.'; Act={ Repair-SignInServices } }
+    @{ Group='Repair Windows'; Label='Repair sign-in and credential services'; Info='Sets the services that keep you signed in back to their Windows defaults: Microsoft account sign-in (wlidsvc) and Web Account Manager (TokenBroker), Windows Hello PIN and passkeys (NgcSvc, NgcCtnrSvc), Windows Hello face and fingerprint (WbioSrvc), key isolation (KeyIso), Credential Manager (VaultSvc), Cryptographic Services (CryptSvc), and the Chrome, Edge and Brave elevation services that unlock browser cookie and password encryption. Use it when Microsoft apps, Windows Hello or a browser keep signing you out. It does not bring back logins that were already lost; sign in again afterwards. Restart required.'; Act={ Repair-SignInServices } }
     @{ Group='Repair Windows'; Label='Clear Fault Tolerant Heap app list'; Info='Runs Rundll32.exe fthsvc.dll,FthSysprepSpecialize, the built-in command that resets the list of applications Fault Tolerant Heap is tracking. Apps that crashed a few times in the past lose the FTH shims that slow their memory allocations. Windows can add an app again if it keeps crashing.'; Act={ $proc = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\rundll32.exe') -ArgumentList 'fthsvc.dll,FthSysprepSpecialize' -Wait -PassThru; Write-Log ("Fault Tolerant Heap app list cleared (exit {0})." -f $proc.ExitCode) 'Success' } }
     @{ Group='Repair Windows'; Label='Rebuild the search index'; Info='Resets Windows Search. Fixes broken Start/Settings search.'; Act={ Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows Search' 'SetupCompletedSuccessfully' 0 'DWord'; Restart-Service WSearch -ErrorAction SilentlyContinue } }
     @{ Group='Gaming and anti-cheat'; Label='Repair Xbox app and services (Microsoft Gaming Repair Tool + reinstall)'; Info='Runs the bundled Gaming Repair Tool only if its Authenticode signature is valid and Microsoft signed, then repairs or installs Xbox app, Game Bar, Gaming Services and Identity Provider through WinGet. It never falls back to an MS Store page.'; Act={ Invoke-GamingRepair } }
@@ -7232,7 +7296,7 @@ function Get-HealthWorkerScript {
 
 function Start-HealthScan {
     $data = @{}
-    foreach ($name in 'Env','Detection','Journal','NoPreset','UsbVendors','HealthCategories','GhostAllowedBuses','GhostBlockedClasses') {
+    foreach ($name in 'Env','Detection','Journal','NoPreset','SignInGuardIds','UsbVendors','HealthCategories','GhostAllowedBuses','GhostBlockedClasses') {
         $data[$name] = Get-Variable -Name $name -Scope Script -ValueOnly -ErrorAction SilentlyContinue
     }
     $data.HealthCategoryOrder = @($script:HealthCategories.Keys)
@@ -8420,7 +8484,7 @@ $ViewSafe.Add_Click({ Update-ViewFilter })
 $ViewModerate.Add_Click({ Update-ViewFilter })
 $ViewRisky.Add_Click({ Update-ViewFilter })
  
-$script:NoPreset = @('feat.net.wifi','feat.net.eth','gpu.msi')
+$script:NoPreset = @('feat.net.wifi','feat.net.eth','gpu.msi') + @($script:SignInGuardIds)
 foreach ($p in @('Recommended','Gamer max','Minimal','Max (incl. Risky)','None')) { [void]$PresetCombo.Items.Add($p) }
 $script:GamerMaxExclude = @('svc.net.discovery','svc.bg.diag','net.teredo','startup.all','gpu.vrr.windowed','feat.lighting.off','feat.taskbar.simple','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
 function Test-GamerMax {
@@ -8910,6 +8974,15 @@ function Complete-ApplyRun {
 function Invoke-ApplySelected {
     param($Nodes,[bool]$RestoreFirst)
     if ($script:ApplyRun) { Write-Log 'An apply is already running.' 'Warn'; return }
+    $signInRisk = $null
+    $Nodes = @(foreach ($n in @($Nodes)) {
+        if ($n.TargetApplied -and $script:SignInGuardIds -contains [string]$n.Tweak.Id) {
+            if (-not $signInRisk) { $signInRisk = Get-SignInLockoutRisk }
+            $why = Get-SignInGuardReason $n $signInRisk
+            if ($why) { Write-Log ('Skipped {0}: signing in to Windows could stop working ({1}).' -f $n.Tweak.Label,$why) 'Error'; continue }
+        }
+        $n
+    })
     $script:AdlxTuningPending = @(@($Nodes) | Where-Object { $_.Choice -and $script:AdlxIndex.ContainsKey([string]$_.Tweak.Id) -and $script:AdlxIndex[[string]$_.Tweak.Id].Tuning } | ForEach-Object { [string]$_.Tweak.Id })
     foreach ($b in @($ApplyBtn,$PresetCombo)) { $b.IsEnabled = $false }
     $started = $false
@@ -9026,11 +9099,18 @@ $ApplyBtn.Add_Click({
     $curTab = if ($Tabs.SelectedItem.Tag -is [string]) { [string]$Tabs.SelectedItem.Tag } else { [string]$Tabs.SelectedItem.Header }
     if ($curTab -eq 'Games') { try { Save-AllGames } catch { Write-Log ('Game settings: save failed: {0}' -f $_.Exception.Message) 'Error' }; return }
     $pending = @(Get-PendingTweaks)
+    $signInBlocked = @($pending | Where-Object { Get-SignInGuardReason $_ })
+    if ($signInBlocked.Count) {
+        $pending = @($pending | Where-Object { $signInBlocked -notcontains $_ })
+        foreach ($n in $signInBlocked) { $row = $script:Rows[[string]$n.Tweak.Id]; if ($row -and $row.Check) { $row.Check.IsChecked = [bool]($script:Detection[[string]$n.Tweak.Id] -and $script:Detection[[string]$n.Tweak.Id].Applied) } }
+        Show-SignInGuardMessage $signInBlocked
+    }
     Write-Log ("Apply: {0} change(s) pending; {1} rows ticked" -f $pending.Count,@($script:Rows.Values | Where-Object { $_.Check -and $_.Check.IsChecked }).Count) 'Info'
     $appPending=@($script:DebloatChecks + $script:ProgramChecks | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
     $reinstallPending=@($script:ReinstallChecks | Where-Object { $_.IsChecked })
     if ($reinstallPending.Count) { try { Invoke-AppReinstall $reinstallPending } catch { Write-Log ('Reinstall failed: {0}' -f $_.Exception.Message) 'Error' }; if ($pending.Count -eq 0 -and $appPending.Count -eq 0) { return } }
     if ($pending.Count -eq 0 -and $appPending.Count -eq 0) {
+        if ($signInBlocked.Count -and -not (Test-GamesPending)) { return }
         $script:LastApplyOutcome = 'nothing'
         if (Test-GamesPending) { try { Save-AllGames } catch { Write-Log ('Game settings: save failed: {0}' -f $_.Exception.Message) 'Error' }; return }
         [System.Windows.MessageBox]::Show("Nothing to change. Ticked settings are already applied.`r`n`r`nTick a setting to apply it, or untick an applied one to restore its original value.",'Rion Tool','OK','Information') | Out-Null
@@ -9045,7 +9125,7 @@ $ApplyBtn.Add_Click({
         $r=[System.Windows.MessageBox]::Show($msg,'Maximum debloat profile','OKCancel','Warning')
         if($r -ne 'OK'){return}
     }
-    $hasNet = @($pending | Where-Object { $script:NoPreset -contains $_.Tweak.Id })
+    $hasNet = @($pending | Where-Object { $_.Tweak.Id -in 'feat.net.wifi','feat.net.eth' -and $_.TargetApplied })
     if ($hasNet.Count -gt 0) {
         $names = ($hasNet | ForEach-Object { $_.Tweak.Label }) -join ', '
         $msg = "You selected a network adapter disable: $names`r`n`r`nThis cuts that connection until you re-enable it (Features tab, or Fixes > Re-enable network adapters). If this is your only connection you will lose internet access.`r`n`r`nContinue?"
