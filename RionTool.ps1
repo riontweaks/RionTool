@@ -1586,6 +1586,12 @@ $script:ShellBackgroundApps = @(
     'Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy','Microsoft.Windows.ShellExperienceHost_cw5n1h2txyewy',
     'Microsoft.Windows.InputApp_cw5n1h2txyewy'
 )
+$script:SignInBackgroundApps = @(
+    'Microsoft.LockApp_cw5n1h2txyewy','Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy',
+    'Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy','Microsoft.AccountsControl_cw5n1h2txyewy',
+    'Microsoft.CredDialogHost_cw5n1h2txyewy','Microsoft.Windows.CloudExperienceHost_cw5n1h2txyewy'
+)
+$script:ShellBackgroundApps = @($script:ShellBackgroundApps + $script:SignInBackgroundApps)
 
 $script:OsBuild = 0
 try { $script:OsBuild = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).CurrentBuildNumber } catch { }
@@ -2014,7 +2020,7 @@ $script:Tweaks += (New-Tweak -Id 'sec.widgets' -Tab 'Tweaks' -SubTab 'Features' 
 $script:Tweaks += (New-Tweak -Id 'sec.crossresume' -Tab 'Tweaks' -SubTab 'Features' -Group 'Cloud and cross-device' -Label 'Disable cross-device resume' -Risk 'Safe' -Detect @{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';name='EnableCdp'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';name='EnableCdp';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';name='EnableCdp'}) -Info 'Disables Connected Devices Platform cross-device experiences by policy. Phone Link and cross-device resume features may stop syncing.'  -Recommend $true)
 $script:Tweaks += (New-Tweak -Id 'sec.recall' -Tab 'Tweaks' -SubTab 'Features' -Group 'AI and Copilot' -Label 'Disable Recall' -Risk 'Safe' -Detect @{kind='appxPattern';pattern='*Client.AIX*'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI';name='DisableAIDataAnalysis';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI';name='DisableAIDataAnalysis'}) -Info 'Disables Recall snapshot analysis by Windows policy when Recall components are installed. This does not remove Recall data already saved.'  -Recommend $true)
 $script:Tweaks += (New-Tweak -Id 'sec.clicktodo' -Tab 'Tweaks' -SubTab 'Features' -Group 'AI and Copilot' -Label 'Disable Click to Do' -Risk 'Safe' -Detect $null -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI';name='DisableClickToDo';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI';name='DisableClickToDo'}) -Info 'Turns off Click to Do with the documented WindowsAI DisableClickToDo policy. Click to Do is part of a Windows system package and cannot be uninstalled, so this policy is the supported way to turn it off. It has no effect on PCs without the feature.'  -Recommend $true)
-$script:Tweaks += (New-Tweak -Id 'sec.storebackground' -Tab 'Tweaks' -SubTab 'Features' -Group 'Background and power' -Label 'Disable background apps for Store apps' -Risk 'Moderate' -Detect @{kind='appxAny'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground';value=2;type='DWord'},@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground_ForceAllowTheseApps';value=$script:ShellBackgroundApps;type='MultiString'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground'},@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground_ForceAllowTheseApps'}) -Info 'Blocks Store apps from running in the background by device policy, while always allowing the Start menu, Search, shell and text-input apps (blocking those makes Start ignore typing until you click the search box). Live tiles, notifications, sync, and background downloads of other Store apps may stop.'  -Recommend $true)
+$script:Tweaks += (New-Tweak -Id 'sec.storebackground' -Tab 'Tweaks' -SubTab 'Features' -Group 'Background and power' -Label 'Disable background apps for Store apps' -Risk 'Moderate' -Detect @{kind='appxAny'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground';value=2;type='DWord'},@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground_ForceAllowTheseApps';value=$script:ShellBackgroundApps;type='MultiString'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground'},@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy';name='LetAppsRunInBackground_ForceAllowTheseApps'}) -Info 'Blocks Store apps from running in the background by device policy, while always allowing the Start menu, Search, shell and text-input apps (blocking those makes Start ignore typing until you click the search box) and the lock screen and sign-in apps (lock screen, Spotlight content, Microsoft and work account sign-in, credential prompts). Live tiles, notifications, sync, and background downloads of other Store apps may stop.'  -Recommend $true)
 $script:Tweaks += (New-Tweak -Id 'sec.updates.manual' -Tab 'Security' -SubTab '' -Group 'Windows Update' -Label 'Set Windows Update to manual' -Risk 'Moderate' -Detect @{kind='serviceAny';names=@('wuauserv','UsoSvc','WaaSMedicSvc');start='Manual'} -Apply @(@{kind='updateManual'}) -Revert @(@{kind='update';enable=$true}) -Info 'Sets Windows Update services to Manual/on-demand startup. Windows may still start them for maintenance; use the separate Disable Windows Update switch only if you accept missing security updates.' )
 $script:Tweaks += (New-Tweak -Id 'sec.privacy.cortana' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Disable Cortana consent' -Risk 'Safe' -Detect @{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search';name='CortanaConsent'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search';name='CortanaConsent';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search';name='CortanaConsent'}) -Info 'Turns off Cortana search consent for the current user.'  -Recommend $true)
 $script:Tweaks += (New-Tweak -Id 'sec.privacy.locktips' -Tab 'Tweaks' -SubTab 'Features' -Group 'Privacy and ads' -Label 'Disable rotating lock screen and tips' -Risk 'Safe' -Detect @{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='RotatingLockScreenEnabled'} -Apply @(@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='RotatingLockScreenEnabled';value=0;type='DWord'},@{kind='registry';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='RotatingLockScreenOverlayEnabled';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='RotatingLockScreenEnabled'},@{kind='registryDel';path='HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager';name='RotatingLockScreenOverlayEnabled'}) -Info 'Stops rotating Spotlight lock-screen photos and its overlay tips for the current user.'  -Recommend $true)
@@ -2667,6 +2673,9 @@ foreach ($t in $script:Tweaks) {
 }
 
 $script:SignInGuardIds = @('svc.feat.hello','svc.feat.account','svc.dev.smartcard')
+$script:NoMaxPreset = @('sec.storebackground','svc.feat.notifications')
+$script:NoMaxWarn = @{ 'sec.storebackground'='Store apps that are not on the allowed list stop syncing, updating notifications and downloading in the background until you open them.'; 'svc.feat.notifications'='App and system notifications, the notification center and app status on the lock screen stop.' }
+foreach ($t in $script:Tweaks) { if ($script:NoMaxPreset -contains $t.Id) { $t.Warn = (([string]$t.Warn).TrimEnd() + ' ' + $script:NoMaxWarn[$t.Id] + ' Never selected by the Max or Gamer max presets because it reaches the lock screen and sign-in apps; tick it by hand.').Trim() } }
 function Get-SignInAccountName {
     param([string]$Sid)
     $name = $Sid
@@ -6620,6 +6629,12 @@ $script:HealthChecks = @(
     } }
     @{ Category='Risky settings'; Run={
         $off = @(@('wlidsvc','Microsoft account sign-in'),@('NgcSvc','Windows Hello PIN and passkeys'),@('TokenBroker','Web Account Manager (Office, Teams, Edge sign-in)') | Where-Object { (Get-ServiceStartValue $_[0]) -eq 4 } | ForEach-Object { $_[1] })
+        $bgPol = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy' -ErrorAction SilentlyContinue
+        if ($bgPol -and [int]$bgPol.GetValue('LetAppsRunInBackground',0) -eq 2) {
+            $bgAllow = @($bgPol.GetValue('LetAppsRunInBackground_ForceAllowTheseApps'))
+            $bgMissing = @($script:SignInBackgroundApps | Where-Object { $bgAllow -notcontains $_ } | ForEach-Object { ($_ -split '_')[0] })
+            if ($bgMissing.Count) { New-HealthFinding 'Risky settings' 'warn' 8 'Lock screen and sign-in apps are blocked from running in the background' ('Background apps are blocked by policy without an exception for ' + ($bgMissing -join ', ') + '. The lock screen can hang on the wallpaper and Microsoft or work account sign-in can fail. The fix adds them to the allowed list.') 'Allow lock screen and sign-in apps' { Repair-StartSearch } }
+        }
         $helloOff = @('NgcSvc','NgcCtnrSvc','WbioSrvc','wlidsvc' | Where-Object { (Get-ServiceStartValue $_) -eq 4 })
         if ($helloOff.Count) {
             $risk = Get-SignInLockoutRisk
@@ -6867,7 +6882,7 @@ $fixDefs = @(
     @{ Group='Repair Windows'; Label='Turn Windows Update back on'; Info='Puts the Windows Update, Update Orchestrator, Medic, BITS and Delivery Optimization services back to their defaults, removes policies other tools use to block updates (no auto update, blocked update servers, hidden update page) and turns the update tasks back on. Your feature-update deferral and driver choices stay as they are.'; Act={ Repair-WindowsUpdate } }
     @{ Group='Repair Windows'; Label='Turn Microsoft Defender back on'; Info='Undoes the Rion Tool Defender option and removes the policies other tools use to switch Defender off (DisableAntiSpyware, real-time protection and cloud policies), turns its scheduled tasks back on and opens Windows Security. Restart afterwards.'; Act={ Repair-Defender } }
     @{ Group='Gaming and anti-cheat'; Label='Install missing game runtimes (Visual C++, DirectX)'; Info='Installs the Visual C++ 2015-2022 runtimes (64 and 32-bit) and the DirectX End-User Runtime through WinGet when they are missing. Most games and launchers need them; a missing one shows up as "VCRUNTIME140.dll was not found" or "d3dx9_43.dll is missing".'; Act={ Install-GameRuntimes } }
-    @{ Group='Repair Windows'; Label='Fix Start menu typing (search ignores keys until clicked)'; Info='Lets the Start menu, Search, shell and text-input apps run in the background even when background apps are blocked, clears the per-user background-app off switches, re-enables the text input service and ctfmon, then restarts Search and Start.'; Act={ Repair-StartSearch } }
+    @{ Group='Repair Windows'; Label='Fix Start menu typing (search ignores keys until clicked)'; Info='Lets the Start menu, Search, shell, text-input, lock screen and sign-in apps run in the background even when background apps are blocked, clears the per-user background-app off switches, re-enables the text input service and ctfmon, then restarts Search and Start.'; Act={ Repair-StartSearch } }
     @{ Group='Reset tuning to Windows defaults'; Label='Reset network adapter tuning to driver defaults'; Info='Puts every physical adapter back to its driver defaults for checksum/LSO/UDP offloads, flow control, interrupt moderation, packet coalescing, buffers, RSC and RSS, removes Nagle (TcpAckFrequency/TCPNoDelay) values, sets TCP autotuning to normal and restarts connected adapters (a few seconds offline). Use this if network tweaks made the connection unstable.'; Act={ Reset-NetworkTuning } }
     @{ Group='Deep cleanup'; Label='Clear Windows Update and Store caches'; Info='Stops the update services, clears the SoftwareDistribution download cache and the Delivery Optimization cache, restarts the services, and resets the Microsoft Store cache (wsreset). Fixes stuck updates and Store errors; the next update check and Store open rebuild the caches.'; Act={ Clear-UpdateAndStoreCaches } }
     @{ Group='Repair Windows'; Label='Restart to Advanced Startup (recovery options)'; Info='Runs shutdown /r /o /t 0 to reboot straight into the blue Choose an option / recovery screen (same as holding Shift while clicking Restart), where you can launch Startup Repair, System Restore, a boot device or UEFI settings. Windows must restart once to reach WinRE; there is no supported way to open it without a reboot. Save your work first.'; Act={ Start-Process shutdown.exe -ArgumentList '/r','/o','/t','0' } }
@@ -7296,7 +7311,7 @@ function Get-HealthWorkerScript {
 
 function Start-HealthScan {
     $data = @{}
-    foreach ($name in 'Env','Detection','Journal','NoPreset','SignInGuardIds','UsbVendors','HealthCategories','GhostAllowedBuses','GhostBlockedClasses') {
+    foreach ($name in 'Env','Detection','Journal','NoPreset','SignInGuardIds','SignInBackgroundApps','UsbVendors','HealthCategories','GhostAllowedBuses','GhostBlockedClasses') {
         $data[$name] = Get-Variable -Name $name -Scope Script -ValueOnly -ErrorAction SilentlyContinue
     }
     $data.HealthCategoryOrder = @($script:HealthCategories.Keys)
@@ -8486,7 +8501,7 @@ $ViewRisky.Add_Click({ Update-ViewFilter })
  
 $script:NoPreset = @('feat.net.wifi','feat.net.eth','gpu.msi') + @($script:SignInGuardIds)
 foreach ($p in @('Recommended','Gamer max','Minimal','Max (incl. Risky)','None')) { [void]$PresetCombo.Items.Add($p) }
-$script:GamerMaxExclude = @('svc.net.discovery','svc.bg.diag','net.teredo','startup.all','gpu.vrr.windowed','feat.lighting.off','feat.taskbar.simple','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
+$script:GamerMaxExclude = @($script:NoMaxPreset) + @('svc.net.discovery','svc.bg.diag','net.teredo','startup.all','gpu.vrr.windowed','feat.lighting.off','feat.taskbar.simple','cpu.ppm.minstate','cpu.amd.x3dcache','sec.vbs','sec.lsa.ppl','sec.wu.pinversion','svc.bg.servicing','svc.net.iphlp','feat.opt.media','svc.xbox.live','task.xblgamesave')
 function Test-GamerMax {
     param($Tweak)
     if ($Tweak.Risk -notin 'Safe','Moderate') { return $false }
@@ -8542,7 +8557,7 @@ function Set-PagePreset {
         $inPreset = switch ($sel) {
             'Recommended'       { [bool]$e.Tweak.Recommend }
             'Minimal'           { $script:MinimalIds -contains $e.Tweak.Id }
-            'Max (incl. Risky)' { $true }
+            'Max (incl. Risky)' { $script:NoMaxPreset -notcontains $e.Tweak.Id }
             'Gamer max'         { Test-GamerMax $e.Tweak }
             default             { $false }
         }
