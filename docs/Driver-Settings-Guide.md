@@ -1,6 +1,6 @@
 # Manual driver app settings (AMD / NVIDIA / Intel)
 
-These settings live inside the graphics driver apps, so set them by hand. On NVIDIA, Rion Tool can apply the main 3D settings for you (Low Latency Mode, Power management mode, texture filtering) through NVIDIA Profile Inspector on the NVIDIA tab; the rest of this page is manual.
+These settings live inside the graphics driver apps. The AMD and NVIDIA tabs in Rion Tool can set most of them for you; use this page for the rest.
 
 **Order of importance:**
 - In-game latency tech (Reflex / Anti-Lag 2 / XeLL) is the biggest win.
