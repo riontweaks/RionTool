@@ -5584,25 +5584,58 @@ function Enable-ControlFlowGuard {
     Write-Log 'Enabled system-wide Control Flow Guard. Restart affected apps (or Windows) for the setting to take effect.' 'Warn'
 }
  
-function Repair-StartSearch {
+function Add-ShellBackgroundAllow {
     $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
     $item = Get-Item -LiteralPath $pol -ErrorAction SilentlyContinue
-    if ($item -and @($item.GetValueNames()) -contains 'LetAppsRunInBackground') {
-        $allow = @($item.GetValue('LetAppsRunInBackground_ForceAllowTheseApps')) | Where-Object { $_ }
-        Set-RegValue -Path $pol -Name 'LetAppsRunInBackground_ForceAllowTheseApps' -Value ([string[]]@(@($allow) + $script:ShellBackgroundApps | Select-Object -Unique)) -Type MultiString
+    if (-not ($item -and @($item.GetValueNames()) -contains 'LetAppsRunInBackground')) { return $false }
+    $allow = @($item.GetValue('LetAppsRunInBackground_ForceAllowTheseApps')) | Where-Object { $_ }
+    $missing = @($script:ShellBackgroundApps | Where-Object { $allow -notcontains $_ })
+    if (-not $missing.Count) { return $false }
+    Set-RegValue -Path $pol -Name 'LetAppsRunInBackground_ForceAllowTheseApps' -Value ([string[]]@(@($allow) + $script:ShellBackgroundApps | Select-Object -Unique)) -Type MultiString
+    Write-Log ('Background apps stay blocked, but these Windows apps may run again: {0}.' -f (@($missing | ForEach-Object { ($_ -split '_')[0] }) -join ', ')) 'Success'
+    return $true
+}
+function Enable-ShellComponentsService {
+    $fixed = @()
+    foreach ($s in @(Resolve-ServiceNames 'UdkUserSvc_*')) {
+        if ((Get-ServiceStartValue $s) -ne 4) { continue }
+        try { Set-ServiceStartNow -Name $s -Start 3; $fixed += $s } catch { Write-Log ('Could not turn {0} back on: {1}' -f $s,$_.Exception.Message) 'Warn' }
     }
+    foreach ($s in @($fixed | Where-Object { $_ -match '_[0-9a-fA-F]{4,}$' })) { try { Start-Service -Name $s -ErrorAction Stop } catch { Write-Log ('{0} starts after you sign out and back in.' -f $s) 'Info' } }
+    if ($fixed.Count) { Write-Log ('Shell components service set back to Manual ({0}). Start hands typing to Search through it; sign out and back in if typing in Start still needs a click.' -f ($fixed -join ', ')) 'Success' }
+    return $fixed.Count
+}
+function Repair-StartSearchHandoff {
+    $n = Enable-ShellComponentsService
+    Get-Process SearchHost,SearchApp,StartMenuExperienceHost -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    if (-not $n) { Write-Log 'The Shell components service (UdkUserSvc) was already on. Start and Search were restarted; if typing in Start still needs a click, run Fix Start menu typing.' 'Success' }
+}
+function Repair-LockScreenSignIn {
+    Repair-SignInServices
+    [void](Add-ShellBackgroundAllow)
+    $wpn = @()
+    foreach ($s in @(@(Resolve-ServiceNames 'WpnService') + @(Resolve-ServiceNames 'WpnUserService_*'))) {
+        if ((Get-ServiceStartValue $s) -ne 4) { continue }
+        try { Set-ServiceStartNow -Name $s -Start 2; $wpn += $s } catch { Write-Log ('Could not turn {0} back on: {1}' -f $s,$_.Exception.Message) 'Warn' }
+    }
+    foreach ($s in $wpn) { try { Start-Service -Name $s -ErrorAction Stop } catch { Write-Log ('{0} starts after a restart.' -f $s) 'Info' } }
+    if ($wpn.Count) { Write-Log ('Windows push notification services set back to Automatic: {0}.' -f ($wpn -join ', ')) 'Success' }
+    foreach ($pk in @(Get-AppxPackage -AllUsers -Name 'Microsoft.LockApp' -ErrorAction SilentlyContinue)) {
+        $mf = Join-Path ([string]$pk.InstallLocation) 'AppxManifest.xml'
+        if (Test-Path -LiteralPath $mf) { try { Add-AppxPackage -DisableDevelopmentMode -Register $mf -ErrorAction Stop } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } }
+    }
+    $risk = Get-SignInLockoutRisk
+    if ($risk.HelloOnly) { Write-Log 'This PC only allows Windows Hello sign-in. Keep a working PIN, or turn off "For improved security, only allow Windows Hello sign-in" in Settings > Accounts > Sign-in options so the password box is always offered.' 'Warn' }
+    Write-Log 'Lock screen and sign-in repair finished. Restart, then check that the lock screen opens to the sign-in box. If it still shows only the wallpaper, press Ctrl+Alt+Del.' 'Success'
+}
+function Repair-StartSearch {
+    [void](Add-ShellBackgroundAllow)
     Remove-RegValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name 'GlobalUserDisabled'
     Remove-RegValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' -Name 'BackgroundAppGlobalToggle'
     foreach ($s in 'TextInputManagementService','TabletInputService') {
         if ((Test-ServiceExists $s) -and (Get-ServiceStartValue $s) -eq 4) { [void](Set-ServiceStart -Name $s -StartType $(if ($s -eq 'TextInputManagementService') { 'Automatic' } else { 'Manual' })); Start-Service -Name $s -ErrorAction SilentlyContinue }
     }
-    $udkFixed = @()
-    foreach ($s in @(Resolve-ServiceNames 'UdkUserSvc_*')) {
-        if ((Get-ServiceStartValue $s) -ne 4) { continue }
-        try { Set-ServiceStartNow -Name $s -Start 3; $udkFixed += $s } catch { Write-Log ('Could not turn {0} back on: {1}' -f $s,$_.Exception.Message) 'Warn' }
-    }
-    foreach ($s in @($udkFixed | Where-Object { $_ -match '_[0-9a-fA-F]{4,}$' })) { try { Start-Service -Name $s -ErrorAction Stop } catch { Write-Log ('{0} starts after you sign out and back in.' -f $s) 'Info' } }
-    if ($udkFixed.Count) { Write-Log ('Shell components service set back to Manual ({0}). Start hands typing to Search through it; sign out and back in if typing in Start still needs a click.' -f ($udkFixed -join ', ')) 'Success' }
+    [void](Enable-ShellComponentsService)
     Enable-ScheduledTask -TaskPath '\Microsoft\Windows\TextServicesFramework\' -TaskName 'MsCtfMonitor' -ErrorAction SilentlyContinue | Out-Null
     if (-not (Get-Process ctfmon -ErrorAction SilentlyContinue)) { Start-Process "$env:SystemRoot\System32\ctfmon.exe" -ErrorAction SilentlyContinue }
     $wv2Key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FeatureManagement\Overrides\8\1694661260'
@@ -6891,6 +6924,7 @@ $fixDefs = @(
     @{ Group='Repair Windows'; Label='Turn Microsoft Defender back on'; Info='Undoes the Rion Tool Defender option and removes the policies other tools use to switch Defender off (DisableAntiSpyware, real-time protection and cloud policies), turns its scheduled tasks back on and opens Windows Security. Restart afterwards.'; Act={ Repair-Defender } }
     @{ Group='Gaming and anti-cheat'; Label='Install missing game runtimes (Visual C++, DirectX)'; Info='Installs the Visual C++ 2015-2022 runtimes (64 and 32-bit) and the DirectX End-User Runtime through WinGet when they are missing. Most games and launchers need them; a missing one shows up as "VCRUNTIME140.dll was not found" or "d3dx9_43.dll is missing".'; Act={ Install-GameRuntimes } }
     @{ Group='Repair Windows'; Label='Fix Start menu typing (search ignores keys until clicked)'; Info='Lets the Start menu, Search, shell, text-input, lock screen and sign-in apps run in the background even when background apps are blocked, clears the per-user background-app off switches, re-enables the text input service, ctfmon and the Shell components service (UdkUserSvc, which hands what you type in Start to Search), then restarts Search and Start.'; Act={ Repair-StartSearch } }
+    @{ Group='Repair Windows'; Label='Fix typing in Start not opening Search (Shell components service)'; Info='When you press Windows and start typing but nothing is searched until you click the search box: Start hands what you type to Search through the Shell components service (UdkUserSvc). Sets it and its per-user instance back to Manual (the Windows default), starts it and restarts Start and Search. Older Rion Tool builds disabled it in Turn off newer per-user background helpers. Sign out and back in if the first try still needs a click.'; Act={ Repair-StartSearchHandoff } }
     @{ Group='Reset tuning to Windows defaults'; Label='Reset network adapter tuning to driver defaults'; Info='Puts every physical adapter back to its driver defaults for checksum/LSO/UDP offloads, flow control, interrupt moderation, packet coalescing, buffers, RSC and RSS, removes Nagle (TcpAckFrequency/TCPNoDelay) values, sets TCP autotuning to normal and restarts connected adapters (a few seconds offline). Use this if network tweaks made the connection unstable.'; Act={ Reset-NetworkTuning } }
     @{ Group='Deep cleanup'; Label='Clear Windows Update and Store caches'; Info='Stops the update services, clears the SoftwareDistribution download cache and the Delivery Optimization cache, restarts the services, and resets the Microsoft Store cache (wsreset). Fixes stuck updates and Store errors; the next update check and Store open rebuild the caches.'; Act={ Clear-UpdateAndStoreCaches } }
     @{ Group='Repair Windows'; Label='Restart to Advanced Startup (recovery options)'; Info='Runs shutdown /r /o /t 0 to reboot straight into the blue Choose an option / recovery screen (same as holding Shift while clicking Restart), where you can launch Startup Repair, System Restore, a boot device or UEFI settings. Windows must restart once to reach WinRE; there is no supported way to open it without a reboot. Save your work first.'; Act={ Start-Process shutdown.exe -ArgumentList '/r','/o','/t','0' } }
@@ -6906,6 +6940,7 @@ $fixDefs = @(
     @{ Group='Reset tuning to Windows defaults'; Label='Reset CPU scheduling and multimedia scheduler values to Windows defaults'; Info='Restores the Windows foreground boost (Win32PrioritySeparation 0x26), turns background power throttling (EcoQoS) back on, and repairs multimedia scheduler values left by older Rion Tool builds or other tweak tools. Fixed quanta without a foreground boost and EcoQoS off both let background apps compete with games for CPU time and power. Values reset: NetworkThrottlingIndex 10, SystemResponsiveness 20, the Games task back to Priority 2 / GPU Priority 8 / Medium scheduling / Normal I/O, and removes the undocumented NoLazyMode, AlwaysOn and LazyModeTimeout values. Restart to apply.'; Act={ Reset-MmcssDefaults } }
     @{ Group='Reset tuning to Windows defaults'; Label='Reset processor idle, core parking, minimum state and EPP to Windows defaults'; Info='Sets processor idle disable, core parking minimum and maximum cores, minimum processor state and energy performance preference on the active power plan back to the defaults of the Windows plan it is based on (Balanced: idle on, 5% minimum, EPP 33 on AC). Ryzen Precision Boost raises the busy cores highest when idle cores can sleep, so idle disabled, unparked cores pinned at 100% and EPP 0 can lower game clocks. High performance and Ultimate Performance keep their own 100% minimum. Other power plan values are not changed.'; Act={ Reset-ProcessorPowerDefaults } }
     @{ Group='Repair Windows'; Label='Repair sign-in and credential services'; Info='Sets the services that keep you signed in back to their Windows defaults: Microsoft account sign-in (wlidsvc) and Web Account Manager (TokenBroker), Windows Hello PIN and passkeys (NgcSvc, NgcCtnrSvc), Windows Hello face and fingerprint (WbioSrvc), key isolation (KeyIso), Credential Manager (VaultSvc), Cryptographic Services (CryptSvc), and the Chrome, Edge and Brave elevation services that unlock browser cookie and password encryption. Use it when Microsoft apps, Windows Hello or a browser keep signing you out. It does not bring back logins that were already lost; sign in again afterwards. Restart required.'; Act={ Repair-SignInServices } }
+    @{ Group='Repair Windows'; Label='Repair lock screen and sign-in screen (stuck on the wallpaper)'; Info='For a lock screen that shows only the wallpaper and never opens the sign-in box, or a PIN or face sign-in that stopped working. Runs Repair sign-in and credential services (Windows Hello PIN, face and fingerprint, Microsoft account and credential services back to Windows defaults), lets the lock screen and sign-in apps run again when background apps are blocked, turns the Windows push notification services back on (the lock screen uses them for app status), and re-registers the lock screen app. Warns when the PC only allows Windows Hello sign-in. Undoes those parts of the Turn off PIN and biometric sign-in, Stop Microsoft account sign-in and Turn off Windows push notifications rows. Restart required.'; Act={ Repair-LockScreenSignIn } }
     @{ Group='Repair Windows'; Label='Clear Fault Tolerant Heap app list'; Info='Runs Rundll32.exe fthsvc.dll,FthSysprepSpecialize, the built-in command that resets the list of applications Fault Tolerant Heap is tracking. Apps that crashed a few times in the past lose the FTH shims that slow their memory allocations. Windows can add an app again if it keeps crashing.'; Act={ $proc = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\rundll32.exe') -ArgumentList 'fthsvc.dll,FthSysprepSpecialize' -Wait -PassThru; Write-Log ("Fault Tolerant Heap app list cleared (exit {0})." -f $proc.ExitCode) 'Success' } }
     @{ Group='Repair Windows'; Label='Rebuild the search index'; Info='Resets Windows Search. Fixes broken Start/Settings search.'; Act={ Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows Search' 'SetupCompletedSuccessfully' 0 'DWord'; Restart-Service WSearch -ErrorAction SilentlyContinue } }
     @{ Group='Gaming and anti-cheat'; Label='Repair Xbox app and services (Microsoft Gaming Repair Tool + reinstall)'; Info='Runs the bundled Gaming Repair Tool only if its Authenticode signature is valid and Microsoft signed, then repairs or installs Xbox app, Game Bar, Gaming Services and Identity Provider through WinGet. It never falls back to an MS Store page.'; Act={ Invoke-GamingRepair } }
