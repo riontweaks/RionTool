@@ -1655,7 +1655,7 @@ $script:Tweaks += New-ServiceGroup -Id 'svc.vendor.intel' -Tab 'Tweaks' -SubTab 
 $script:Tweaks += New-ServiceGroup -Id 'svc.gpu.nv.container' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop NVIDIA app background container' -Risk 'Moderate' -Services @('NvContainerLocalSystem','NvContainerNetworkService') -RevertType 'Automatic' -Info 'NVIDIA LocalSystem/NetworkService containers used by the NVIDIA app and GeForce Experience. Stopping them turns off the NVIDIA overlay, Instant Replay/recording, in-app driver downloads and game optimization. The driver, G-SYNC and NVIDIA Control Panel keep working.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.gpu.nv.telemetry' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop NVIDIA telemetry container' -Risk 'Safe' -Services @('NvTelemetryContainer') -RevertType 'Automatic' -Info 'NVIDIA telemetry service installed by older drivers. Only usage reporting stops.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.gpu.nv.frameview' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop NVIDIA FrameView SDK service' -Risk 'Safe' -Services @('FvSvc') -RevertType 'Automatic' -Info 'FvSvc (nvfvsdksvc_x64.exe) feeds frame-rate, frame-time and power statistics to FrameView and the NVIDIA app performance overlay. Games and the driver are unaffected; only those statistics stop.'
-$script:Tweaks += New-ServiceGroup -Id 'svc.gpu.amd.crashdefender' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop AMD Crash Defender service' -Risk 'Moderate' -Services @('AMD Crash Defender Service','amdfendrsr') -RevertType 'Automatic' -Info 'User-mode part of AMD Crash Defender (amdfendrsr.exe). It captures GPU driver crash data for AMD bug reports. With it stopped, Windows still recovers from a driver timeout and logs it, but AMD Software cannot collect a crash report, so a crash is harder to diagnose. The Crash Defender kernel driver is never touched.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.gpu.amd.crashdefender' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop AMD Crash Defender service' -Risk 'Safe' -Services @('AMD Crash Defender Service','amdfendrsr') -RevertType 'Automatic' -Info 'User-mode part of AMD Crash Defender (amdfendrsr.exe). It captures GPU driver crash data for AMD bug reports. With it stopped, Windows still recovers from a driver timeout and logs it, but AMD Software cannot collect a crash report, so a crash is harder to diagnose. The Crash Defender kernel driver is never touched.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.gpu.amd.uep' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop AMD User Experience Program' -Risk 'Safe' -Services @('AUEPLauncher','AUEPMaster') -RevertType 'Automatic' -Info 'AMD User Experience Program data collection services. Only usage reporting to AMD stops.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.vendor.audio' -Tab 'Tweaks' -SubTab 'Services' -Group 'Audio' -Label 'Pause audio enhancement companions' -Risk 'Moderate' -Services @('RtkAudioUniversalService','RtkAudUService','A-Volute.Nahimic') -Info 'Audio vendor companion services for control panels, jack detection, and sound enhancements. Core audio can remain while enhancements stop.'
 $script:Tweaks += New-ServiceGroup -Id 'svc.vendor.intellms' -Tab 'Tweaks' -SubTab 'Services' -Group 'Vendor utilities' -Label 'Stop Intel AMT local management service' -Risk 'Safe' -Services @('LMS') -RevertType 'Automatic' -Info 'Intel Management and Security Application Local Management Service (LMS.exe), part of the Intel Management Engine software. It only serves Intel AMT / vPro remote management, which home PCs do not use. The Management Engine driver and firmware keep working.'
@@ -1816,7 +1816,7 @@ $script:Tweaks += (New-Tweak -Id 'task.office.telemetry' -Tab 'Tweaks' -SubTab '
 $script:Tweaks += (New-Tweak -Id 'task.gpu.nv.reports' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable NVIDIA crash and telemetry report tasks' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('NvTmRep*','NvTmMon*')} -Apply @(@{kind='taskNamePattern';patterns=@('NvTmRep*','NvTmMon*')}) -Revert @(@{kind='taskNamePattern';patterns=@('NvTmRep*','NvTmMon*');enable=$true}) -Info 'NVIDIA crash-report and telemetry upload tasks. The driver keeps working; NVIDIA just stops receiving these reports.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.nv.updates' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable NVIDIA driver and app update checks' -Risk 'Moderate' -Detect @{kind='taskAnyNamePattern';patterns=@('NvDriverUpdateCheckDaily*','NVIDIA GeForce Experience SelfUpdate*','NvNodeLauncher*')} -Apply @(@{kind='taskNamePattern';patterns=@('NvDriverUpdateCheckDaily*','NVIDIA GeForce Experience SelfUpdate*','NvNodeLauncher*')}) -Revert @(@{kind='taskNamePattern';patterns=@('NvDriverUpdateCheckDaily*','NVIDIA GeForce Experience SelfUpdate*','NvNodeLauncher*');enable=$true}) -Info 'Daily NVIDIA driver/app update checks. You will need to check for driver updates yourself in the NVIDIA app or on nvidia.com.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.nv.profiles' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable NVIDIA game profile updater' -Risk 'Moderate' -Detect @{kind='taskAnyNamePattern';patterns=@('NvProfileUpdaterDaily*','NvProfileUpdaterOnLogon*')} -Apply @(@{kind='taskNamePattern';patterns=@('NvProfileUpdaterDaily*','NvProfileUpdaterOnLogon*')}) -Revert @(@{kind='taskNamePattern';patterns=@('NvProfileUpdaterDaily*','NvProfileUpdaterOnLogon*');enable=$true}) -Info 'Downloads updated per-game driver profiles between driver releases. New driver installs still bring the latest profiles.' )
-$script:Tweaks += (New-Tweak -Id 'task.gpu.amd.software' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable AMD Software at sign-in' -Risk 'Moderate' -Detect @{kind='taskAnyNamePattern';patterns=@('StartCN','StartCNBM')} -Apply @(@{kind='taskNamePattern';patterns=@('StartCN','StartCNBM')}) -Revert @(@{kind='taskNamePattern';patterns=@('StartCN','StartCNBM');enable=$true}) -Info 'Starts AMD Software: Adrenalin Edition at sign-in. With it off, the in-game overlay, hotkeys and tray icon load only after you open AMD Software yourself.' )
+$script:Tweaks += (New-Tweak -Id 'task.gpu.amd.software' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable AMD Software at sign-in' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('StartCN','StartCNBM')} -Apply @(@{kind='taskNamePattern';patterns=@('StartCN','StartCNBM')}) -Revert @(@{kind='taskNamePattern';patterns=@('StartCN','StartCNBM');enable=$true}) -Info 'Starts AMD Software: Adrenalin Edition at sign-in. With it off, the in-game overlay, hotkeys and tray icon load only after you open AMD Software yourself.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.amd.cpumetrics' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable AMD Software CPU metrics server' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('AMDRyzenMasterSDKTask')} -Apply @(@{kind='taskNamePattern';patterns=@('AMDRyzenMasterSDKTask')}) -Revert @(@{kind='taskNamePattern';patterns=@('AMDRyzenMasterSDKTask');enable=$true}) -Info 'AMDRyzenMasterSDKTask starts cpumetricsserver.exe at sign-in. It uses the Ryzen Master monitoring SDK that AMD Software installs with the graphics driver to feed CPU clock, temperature and usage to the AMD Software performance overlay. With it off, the overlay shows GPU metrics only.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.amd.dvr'-Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable AMD recording at sign-in' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('StartDVR')} -Apply @(@{kind='taskNamePattern';patterns=@('StartDVR')}) -Revert @(@{kind='taskNamePattern';patterns=@('StartDVR');enable=$true}) -Info 'Starts AMD ReLive recording and Instant Replay at sign-in. Leave it on if you record gameplay with AMD Software.' )
 $script:Tweaks += (New-Tweak -Id 'task.gpu.amd.updates' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'GPU software' -Label 'Disable AMD update and telemetry tasks' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('AMDAutoUpdate*','AMDLinkUpdate*','ModifyLinkUpdate*','AMDInstallLauncher*','AMDInstallUEP*')} -Apply @(@{kind='taskNamePattern';patterns=@('AMDAutoUpdate*','AMDLinkUpdate*','ModifyLinkUpdate*','AMDInstallLauncher*','AMDInstallUEP*')}) -Revert @(@{kind='taskNamePattern';patterns=@('AMDAutoUpdate*','AMDLinkUpdate*','ModifyLinkUpdate*','AMDInstallLauncher*','AMDInstallUEP*');enable=$true}) -Info 'AMD software update checks and User Experience Program install tasks. You will need to check for driver updates yourself in AMD Software.' )
@@ -2262,7 +2262,7 @@ $script:Tweaks += (New-Tweak -Id 'cpu.ppm.idledepth' -Tab 'CPU' -SubTab '' -Grou
 
 $discordPerf = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\Discord.exe\PerfOptions'
 $script:Tweaks += (New-Tweak -Id 'app.discord.priority' -Tab 'Tweaks' -SubTab 'Apps' -Group 'Discord' -Label 'Lower Discord CPU priority to Below Normal' -Risk 'Moderate' -Recommend $false -Detect @{kind='appInstalled';name='Discord'} -Apply @(@{kind='registry';path=$discordPerf;name='CpuPriorityClass';value=5;type='DWord'}) -Revert @(@{kind='registryDel';path=$discordPerf;name='CpuPriorityClass'}) -Warn 'Discord runs at Below Normal CPU priority so games get the CPU first; Discord itself can feel a touch slower (voice stays fine). Stored via Image File Execution Options and applies the next time Discord starts.' -Info 'Uses Image File Execution Options to run Discord.exe at Below Normal CPU priority, keeping it out of the way of games. Restart Discord to apply. Unticking removes the override.')
-$script:Tweaks += New-ServiceGroup -Id 'svc.gpu.amd.extevents' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop AMD External Events Utility' -Risk 'Moderate' -RevertType 'Automatic' -Services @('AMD External Events Utility','AMDExternalEventsUtility','atiesrxx') -Info 'AMD External Events Utility (atiesrxx) handles display and power events, Adrenalin hotkeys and the in-game overlay. Stopping it can disable brightness/overlay hotkeys and some event-driven features; the display driver itself keeps working. Only shows on AMD systems.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.gpu.amd.extevents' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop AMD External Events Utility' -Risk 'Safe' -RevertType 'Automatic' -Services @('AMD External Events Utility','AMDExternalEventsUtility','atiesrxx') -Info 'AMD External Events Utility (atiesrxx) handles display and power events, Adrenalin hotkeys and the in-game overlay. Stopping it can disable brightness/overlay hotkeys and some event-driven features; the display driver itself keeps working. Only shows on AMD systems.'
 
 $mouseKey = 'HKCU:\Control Panel\Mouse'
 $script:Tweaks += (New-Tweak -Id 'input.usb.power' -Tab 'Advanced' -SubTab '' -Group 'Input devices' -Label 'Stop Windows turning off USB and input devices to save power' -Risk 'Moderate' -Recommend $false -Detect @{kind='registry'} -Apply @(@{kind='usbPower';enable=$false}) -Revert @(@{kind='usbPower';enable=$true}) -Warn 'Keeps USB, network and input devices powered so they do not drop out (mouse stutter, audio pops, controller disconnects), but uses more power and shortens laptop battery life; re-plugging a device can re-enable its power saving.' -Info 'Clears the "Allow the computer to turn off this device to save power" option on every device that exposes it, using the MSPower_DeviceEnable WMI class. Best on a desktop. Unticking turns device power management back on.')
@@ -3265,6 +3265,7 @@ public static class RionNvapi {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int HFn(IntPtr h);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int HOutHFn(IntPtr s, out IntPtr p);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int GetFn(IntPtr s, IntPtr p, uint id, IntPtr setting);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int GetExFn(IntPtr s, IntPtr p, uint id, IntPtr setting, ref uint x);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int SetFn(IntPtr s, IntPtr p, IntPtr setting);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int SetExFn(IntPtr s, IntPtr p, IntPtr setting, uint a, uint b);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int DelFn(IntPtr s, IntPtr p, uint id);
@@ -3280,7 +3281,7 @@ public static class RionNvapi {
     public const int ProfileSize = 4116;
     public const uint ProfileVersion = 4116u | (1u << 16);
     public const int TypeDword = 0, TypeQword = 4;
-    const uint IdInitialize = 0x0150E828, IdEnumGpus = 0xE5AC921F, IdGpuName = 0xCEEE8E9F, IdDriver = 0x2926AAAD, IdCreateSession = 0x0694D52E, IdDestroySession = 0xDAD9CFF8, IdLoadSettings = 0x375DBD6B, IdSaveSettings = 0xFCBC7E14, IdGlobalProfile = 0x617BFF9F, IdBaseProfile = 0xDA8466A0, IdProfileInfo = 0x61CD6FD6, IdEnumProfiles = 0xBC371EE0, IdNumProfiles = 0x1DAE4FBC, IdGetSetting = 0x73BF8338, IdSetSetting = 0x577DD202, IdSetSettingEx = 0x8A2CF5F5, IdDeleteSetting = 0xE4A26362, IdDeleteSettingEx = 0xD20D29DF;
+    const uint IdInitialize = 0x0150E828, IdEnumGpus = 0xE5AC921F, IdGpuName = 0xCEEE8E9F, IdDriver = 0x2926AAAD, IdCreateSession = 0x0694D52E, IdDestroySession = 0xDAD9CFF8, IdLoadSettings = 0x375DBD6B, IdSaveSettings = 0xFCBC7E14, IdGlobalProfile = 0x617BFF9F, IdBaseProfile = 0xDA8466A0, IdProfileInfo = 0x61CD6FD6, IdEnumProfiles = 0xBC371EE0, IdNumProfiles = 0x1DAE4FBC, IdGetSetting = 0x73BF8338, IdGetSettingEx = 0xEA99498D, IdSetSetting = 0x577DD202, IdSetSettingEx = 0x8A2CF5F5, IdDeleteSetting = 0xE4A26362, IdDeleteSettingEx = 0xD20D29DF;
     static readonly object Gate = new object();
     static IntPtr lib;
     static QueryFn query;
@@ -3375,6 +3376,11 @@ public static class RionNvapi {
     }
     static int Read(IntPtr s, IntPtr p, uint id, IntPtr buf) {
         Clear(buf);
+        if (Has(IdGetSettingEx)) {
+            uint x = 0;
+            if (Fn<GetExFn>(IdGetSettingEx)(s, p, id, buf, ref x) == 0) { return 0; }
+            Clear(buf);
+        }
         return Fn<GetFn>(IdGetSetting)(s, p, id, buf);
     }
     static long ValueOf(IntPtr buf, int type) {
@@ -3409,17 +3415,13 @@ public static class RionNvapi {
         Marshal.WriteInt32(buf, OffId, unchecked((int)id));
         Marshal.WriteInt32(buf, OffType, type);
         if (type == TypeQword) { Marshal.WriteInt64(buf, OffCurrent, value); } else { Marshal.WriteInt32(buf, OffCurrent, unchecked((int)(uint)value)); }
-        int r = Fn<SetFn>(IdSetSetting)(s, p, buf);
-        if (r != 0 && Has(IdSetSettingEx)) {
-            int r2 = Fn<SetExFn>(IdSetSettingEx)(s, p, buf, 0, 0);
-            if (r2 == 0) { LastWritePath = "internal"; return; }
-        }
-        Check(r, "Change setting 0x" + id.ToString("X8"));
+        if (Has(IdSetSettingEx) && Fn<SetExFn>(IdSetSettingEx)(s, p, buf, 0, 0) == 0) { LastWritePath = "internal"; return; }
+        Check(Fn<SetFn>(IdSetSetting)(s, p, buf), "Change setting 0x" + id.ToString("X8"));
         LastWritePath = "public";
     }
     static void DeleteOne(IntPtr s, IntPtr p, uint id) {
-        int r = Fn<DelFn>(IdDeleteSetting)(s, p, id);
-        if (r != 0 && r != -160 && Has(IdDeleteSettingEx)) { r = Fn<DelFn>(IdDeleteSettingEx)(s, p, id); }
+        int r = Has(IdDeleteSettingEx) ? Fn<DelFn>(IdDeleteSettingEx)(s, p, id) : -1;
+        if (r != 0 && r != -160) { r = Fn<DelFn>(IdDeleteSetting)(s, p, id); }
         if (r != 0 && r != -160) { Check(r, "Reset setting 0x" + id.ToString("X8")); }
     }
     public static void Apply(uint[] ids, long[] values, bool[] keep) {
@@ -3509,6 +3511,7 @@ $script:NvIndex = @{}
 foreach ($d in $script:NvDefs) { $script:NvIndex[$d.Id] = $d }
 $script:NvRowIds = @()
 function ConvertTo-NvId { param($Value) return [uint32]([long]$Value -band [long]4294967295) }
+$script:NvInternalIds = @(@(0x0005F543,0x10835000,0x10835005,0x10ECECC9,0xB0D384C0,0x00634291) | ForEach-Object { ConvertTo-NvId $_ })
 function Initialize-Nvapi {
     if ($script:NvapiFailed) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\nvapi64.dll'))) { return $false }
@@ -3535,7 +3538,8 @@ function Get-NvState {
     $keys = for ($i = 0; $i -lt $Def.Keys.Count; $i++) {
         $status = [long]$r[$i * 3]
         if ($status -le -2) { throw ("{0}: the driver could not read setting 0x{1:X8} ({2})." -f $Def.Label,(ConvertTo-NvId $Def.Keys[$i]),$(if ($status -eq -2) { [RionNvapi]::StatusName([int]$r[$i * 3 + 1]) } else { 'unsupported value type ' + $r[$i * 3 + 1] })) }
-        @{ Set=($status -eq 1); Found=($status -ge 0); Value=$(if ($status -ge 0) { [long]$r[$i * 3 + 1] } else { [long]$Def.Defaults[$i] }) }
+        $plain = ($status -eq 1) -or ($status -eq 0 -and $script:NvInternalIds -notcontains (ConvertTo-NvId $Def.Keys[$i]))
+        @{ Set=($status -eq 1); Found=($status -ge 0); Value=$(if ($plain) { [long]$r[$i * 3 + 1] } else { [long]$Def.Defaults[$i] }) }
     }
     return @($keys)
 }
@@ -6600,7 +6604,7 @@ $script:HealthChecks = @(
         $m = Get-MemoryConfigReport
         if (-not $m) { return }
         foreach ($i in @($m.Issues)) {
-            if ($i -match 'single-channel') { New-HealthFinding 'Hardware' 'bad' 15 'Memory is running in single channel' ($m.Summary + '. ' + $i) }
+            if ($i -match 'single-channel') { New-HealthFinding 'Hardware' 'warn' 0 'Memory is running in single channel' ($m.Summary + '. ' + $i) }
             elseif ($i -match 'EXPO|XMP') { New-HealthFinding 'Hardware' 'bad' 12 'Memory is below its rated speed (EXPO/XMP off)' ($m.Summary + '. ' + $i + ' On ASUS boards: Ai Tweaker > Ai Overclock Tuner > EXPO/XMP.') }
         }
     } }
@@ -6983,7 +6987,7 @@ $script:HealthChecks = @(
     } }
     @{ Category='Maintenance'; Run={
         if (-not $script:Detection) { return }
-        $missing = @($script:Tweaks | Where-Object { $_.Type -ne 'info' -and $_.Type -ne 'dropdown' -and $script:NoPreset -notcontains $_.Id -and [bool]$_.Recommend -and $script:Detection[$_.Id] -and $script:Detection[$_.Id].Present -and -not $script:Detection[$_.Id].Applied })
+        $missing = @($script:Tweaks | Where-Object { $_.Type -ne 'info' -and $_.Type -ne 'dropdown' -and $_.Id -notlike '*.gpu.amd.*' -and $script:NoPreset -notcontains $_.Id -and [bool]$_.Recommend -and $script:Detection[$_.Id] -and $script:Detection[$_.Id].Present -and -not $script:Detection[$_.Id].Applied })
         if ($missing.Count) { New-HealthFinding 'Maintenance' $(if ($missing.Count -gt 20) { 'warn' } else { 'info' }) ([math]::Min(8,[int]($missing.Count / 5))) ('{0} recommended tweaks are not applied' -f $missing.Count) ('Examples: ' + ((@($missing | Select-Object -First 5 | ForEach-Object { $_.Label })) -join '; ') + '. None of them removes a feature people commonly use.') 'Review them' { Invoke-OneClickOptimize } }
     } }
 )
