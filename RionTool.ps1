@@ -302,6 +302,10 @@ function Get-OriginalRecords {
         }
         { $_ -in 'update','updateManual' } {
             foreach ($name in 'wuauserv','UsoSvc','WaaSMedicSvc') { $records += @(Get-OriginalRecords @{ kind='service'; name=$name }) }
+            if ($Action.kind -eq 'update') {
+                $records += Get-RegValueRecord -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoUpdate'
+                $records += @(Get-OriginalRecords @{ kind='taskFolder'; path='\Microsoft\Windows\WindowsUpdate\' })
+            }
         }
         'defender' {
             $base = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
@@ -2561,6 +2565,36 @@ $script:Tweaks += (New-RegRow -Id 'feat.explorer.home' -SubTab 'Features' -Group
 ) -Info 'Removes Home (recent files, favorites and Microsoft 365 recommendations) from the left pane. Pair it with "Open File Explorer to This PC" so Explorer does not open on a hidden page. Restart Explorer to apply.')
 $script:Tweaks += New-ServiceGroup -Id 'svc.ai.agentbroker' -Tab 'Tweaks' -SubTab 'Services' -Group 'Cloud and AI' -Label 'Stop the AI agent workspace broker' -Risk 'Moderate' -Recommend $false -Services @('IsoEnvBroker') -Info 'The Isolation Environment Broker creates agent user accounts, starts their hidden agent sessions, runs programs inside them and shares your folders with them. It is what Copilot Actions and other agents use for the agent workspace. Disabling it keeps agents from getting a workspace even if the experimental agentic features setting is turned on. Only present on builds that ship agent workspaces. Unticking returns it to on-demand.'
 ($script:Tweaks | Where-Object { $_.Id -eq 'svc.ai.agentbroker' }).Warn = 'Copilot Actions and any app that runs AI agents in an agent workspace stop working until it is turned back on.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.feat.maps' -Tab 'Tweaks' -SubTab 'Services' -Group 'Background' -Label 'Stop offline maps downloads' -Risk 'Safe' -Services @('MapsBroker') -Info 'Downloaded Maps Manager fetches and updates offline maps for the Windows Maps app in the background.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.feat.retaildemo' -Tab 'Tweaks' -SubTab 'Services' -Group 'Background' -Label 'Stop store demo mode service' -Risk 'Safe' -Services @('RetailDemo') -Info 'Only used by display PCs in shops running Windows retail demo mode.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.feat.location' -Tab 'Tweaks' -SubTab 'Services' -Group 'Background' -Label 'Stop the location service' -Risk 'Moderate' -Recommend $false -Services @('lfsvc') -Info 'Geolocation service that gives apps and Windows your position.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.feat.filehistory' -Tab 'Tweaks' -SubTab 'Services' -Group 'Storage and backup' -Label 'Stop File History backups' -Risk 'Moderate' -Services @('fhsvc') -Info 'File History copies your libraries to a backup drive on a schedule.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.dev.mixedreality' -Tab 'Tweaks' -SubTab 'Services' -Group 'Sensors and mixed reality' -Label 'Stop mixed reality services' -Risk 'Safe' -Services @('perceptionsimulation','spectrum','MixedRealityOpenXRSvc') -Info 'Perception, spatial and OpenXR services for Windows Mixed Reality headsets.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.feat.sms' -Tab 'Tweaks' -SubTab 'Services' -Group 'Payments and phone' -Label 'Stop the SMS router' -Risk 'Safe' -Services @('SmsRouter') -Info 'Routes text messages on PCs with a built-in cellular modem.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.net.branchcache' -Tab 'Tweaks' -SubTab 'Services' -Group 'Network' -Label 'Stop BranchCache' -Risk 'Safe' -Services @('PeerDistSvc') -Info 'Office network feature that caches files from company servers and shares them between PCs on the same network.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.net.autosetup' -Tab 'Tweaks' -SubTab 'Services' -Group 'Discovery and sharing' -Label 'Stop automatic network device setup' -Risk 'Moderate' -Services @('NcdAutoSetup') -Info 'Finds printers, TVs and other devices on private networks and installs them automatically.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.dev.displayenhance' -Tab 'Tweaks' -SubTab 'Services' -Group 'Devices' -Label 'Stop display brightness management' -Risk 'Moderate' -Recommend $false -Services @('DisplayEnhancementService') -Info 'Manages brightness and content adaptive brightness on built-in laptop and tablet screens. Desktop monitors set their brightness on the monitor itself.'
+$script:Tweaks += New-ServiceGroup -Id 'svc.bg.legacyhelpers' -Tab 'Tweaks' -SubTab 'Services' -Group 'Legacy components' -Label 'Stop legacy admin helpers' -Risk 'Safe' -Services @('RpcLocator','AxInstSV','SNMPTrap') -Info 'Old RPC name lookup, the ActiveX installer used by Internet Explorer controls on company networks, and the SNMP trap receiver for network monitoring tools.'
+$script:Tweaks += (New-Tweak -Id 'task.softlanding' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Tips and promotions' -Label 'Disable Windows tips and promotion tasks' -Risk 'Safe' -Detect @{kind='taskAny';paths=@('\SoftLanding\')} -Apply @(@{kind='taskFolder';path='\SoftLanding\'}) -Revert @(@{kind='taskFolder';path='\SoftLanding\';enable=$true}) -Info 'Tasks that schedule Windows feature tips, promotions and "get the most out of Windows" pages.')
+$script:Tweaks += (New-Tweak -Id 'task.themesync' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Tips and promotions' -Label 'Disable synced theme image downloads' -Risk 'Safe' -Detect @{kind='taskAnyNamePattern';patterns=@('ThemesSyncedImageDownload')} -Apply @(@{kind='taskNamePattern';patterns=@('ThemesSyncedImageDownload')}) -Revert @(@{kind='taskNamePattern';patterns=@('ThemesSyncedImageDownload');enable=$true}) -Info 'Downloads wallpaper images for themes synced from your Microsoft account.')
+$script:Tweaks += (New-Tweak -Id 'task.filehistory' -Tab 'Tweaks' -SubTab 'Startup and tasks' -Group 'Backup and printing' -Label 'Disable File History maintenance task' -Risk 'Moderate' -Detect @{kind='taskAny';paths=@('\Microsoft\Windows\FileHistory\')} -Apply @(@{kind='taskFolder';path='\Microsoft\Windows\FileHistory\'}) -Revert @(@{kind='taskFolder';path='\Microsoft\Windows\FileHistory\';enable=$true}) -Info 'Background clean-up of File History backup versions.')
+$script:Tweaks += (New-Tweak -Id 'kernel.timer.global' -Tab 'Advanced' -SubTab '' -Group 'Kernel' -Label 'Make timer resolution requests system-wide' -Risk 'Moderate' -Detect @{kind='registry'} -Apply @(@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel';name='GlobalTimerResolutionRequests';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel';name='GlobalTimerResolutionRequests'}) -Info 'Windows 11 only honours a timer resolution request for the app that made it, and stops honouring it when that window is minimized or hidden. This brings back the Windows 10 behaviour where one request applies to the whole PC. It can fix older games stuck near 64 FPS or stuttering when alt-tabbed, and lets timer resolution tools work. Needs a restart.')
+foreach ($nr in @(
+    @('svc.feat.maps','Offline maps in the Windows Maps app stop downloading and updating.'),
+    @('svc.feat.retaildemo','Nothing for home PCs; retail demo mode cannot run.'),
+    @('svc.feat.location','Apps, weather, Find my device and automatic time zone can no longer get your location.'),
+    @('svc.feat.filehistory','File History backups stop until it is turned back on.'),
+    @('svc.dev.mixedreality','Windows Mixed Reality and OpenXR headsets stop working.'),
+    @('svc.feat.sms','Text messages on PCs with a built-in SIM or eSIM stop arriving. Phone Link is not affected.'),
+    @('svc.net.branchcache','Office networks that use BranchCache download files from the server again instead of from nearby PCs.'),
+    @('svc.net.autosetup','New network printers and devices must be added by hand in Settings.'),
+    @('svc.dev.displayenhance','The brightness slider and automatic brightness on laptop and tablet screens can stop working.'),
+    @('svc.bg.legacyhelpers','Old company tools that use RPC name lookup, ActiveX installs or SNMP traps stop working.'),
+    @('task.softlanding','Nothing you use; Windows stops scheduling tip and promotion pages.'),
+    @('task.themesync','Synced theme wallpapers from your Microsoft account stop downloading.'),
+    @('task.filehistory','Old File History versions are no longer cleaned up automatically.'),
+    @('kernel.timer.global','A fast timer requested by any app applies to every app, which uses a little more power at idle. Laptops can lose some battery life.')
+)) { ($script:Tweaks | Where-Object { $_.Id -eq $nr[0] }).Warn = $nr[1] }
 $bk = @($script:Tweaks | Where-Object { $_.Id -eq 'task.backup' })[0]
 if ($bk) { $bk.Detect.paths = @($bk.Detect.paths) + @('\Microsoft\Windows\AppListBackup\'); $bk.Apply = @($bk.Apply) + @(@{kind='taskFolder';path='\Microsoft\Windows\AppListBackup\'}); $bk.Revert = @($bk.Revert) + @(@{kind='taskFolder';path='\Microsoft\Windows\AppListBackup\';enable=$true}) }
 $sy = @($script:Tweaks | Where-Object { $_.Id -eq 'task.sync' })[0]
@@ -3683,10 +3717,10 @@ $script:VendorTabMap = @{
     'svc.vendor.intel'=@('Intel','Intel services'); 'svc.vendor.intellms'=@('Intel','Intel services'); 'svc.vendor.inteldsa'=@('Intel','Intel services'); 'gpu.intel.todo'=@('Intel','Intel Graphics Software')
 }
 foreach ($t in $script:Tweaks) { $m = $script:VendorTabMap[$t.Id]; if ($m) { $t.Tab = $m[0]; $t.SubTab = ''; $t.Group = $m[1] } }
-$script:TestFirstIds = @('gpu.hags','gpu.mpo','gpu.mpo.minfps','gpu.msi','gpu.gamemode','gpu.windowed','gpu.vrr.windowed','cpu.parking','cpu.ppm.idle','cpu.ppm.idledepth','cpu.ppm.minstate','cpu.ppm.perfepp','cpu.boost','cpu.ppm.hetero','cpu.ppm.maxfreq','cpu.ppm.responsive','cpu.ppm.latency','cpu.ppm.throttle','pwr.pcie.aspm','pwr.usb.suspend','mem.compression','mem.pagecombining','net.intmod')
+$script:TestFirstIds = @('gpu.hags','gpu.mpo','gpu.mpo.minfps','gpu.msi','gpu.gamemode','gpu.windowed','gpu.vrr.windowed','cpu.parking','cpu.ppm.idle','cpu.ppm.idledepth','cpu.ppm.minstate','cpu.ppm.perfepp','cpu.boost','cpu.ppm.hetero','cpu.ppm.maxfreq','cpu.ppm.responsive','cpu.ppm.latency','cpu.ppm.throttle','pwr.pcie.aspm','pwr.usb.suspend','mem.compression','mem.pagecombining','net.intmod','kernel.timer.global')
 foreach ($t in $script:Tweaks) {
     if ($script:TestFirstIds -notcontains $t.Id) { continue }
-    $t.Group = switch -Wildcard ($t.Id) { 'gpu.*' { 'Graphics' } 'cpu.*' { 'Processor' } 'pwr.*' { 'Device power saving' } 'mem.*' { 'Memory' } default { 'Network' } }
+    $t.Group = switch -Wildcard ($t.Id) { 'gpu.*' { 'Graphics' } 'cpu.*' { 'Processor' } 'pwr.*' { 'Device power saving' } 'mem.*' { 'Memory' } 'kernel.*' { 'Kernel' } default { 'Network' } }
     $t.Tab = 'Test first'; $t.SubTab = ''; $t.Recommend = $false
 }
 $script:FeatureCards = @(
@@ -4816,8 +4850,17 @@ function Invoke-Action {
         }
         'update' {
             $svcs = 'wuauserv','UsoSvc','WaaSMedicSvc'
-            if ($Action.enable) { foreach ($s in $svcs) { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Manual'; try { Start-Service $s -ErrorAction SilentlyContinue } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } } }
-            else { foreach ($s in $svcs) { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Disabled' -Stop } } }
+            $auPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+            $wuTasks = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\WindowsUpdate\' -ErrorAction SilentlyContinue)
+            if ($Action.enable) {
+                foreach ($s in $svcs) { if (Test-ServiceExists $s) { try { [void](Set-ServiceStart -Name $s -StartType 'Manual') } catch { if ($s -ne 'WaaSMedicSvc') { throw } }; Start-Service $s -ErrorAction SilentlyContinue } }
+                Remove-RegValue -Path $auPol -Name 'NoAutoUpdate'
+                foreach ($tk in $wuTasks) { try { Enable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Info' } }
+            } else {
+                foreach ($s in $svcs) { if (Test-ServiceExists $s) { try { [void](Set-ServiceStart -Name $s -StartType 'Disabled' -Stop) } catch { if ($s -ne 'WaaSMedicSvc') { throw }; Write-Log 'Windows protects the Update Medic service, so it was left as it is. The update policy below keeps updates off.' 'Info' } } }
+                Set-RegValue -Path $auPol -Name 'NoAutoUpdate' -Value 1 -Type DWord
+                foreach ($tk in $wuTasks) { try { Disable-ScheduledTask -TaskPath $tk.TaskPath -TaskName $tk.TaskName -ErrorAction Stop | Out-Null } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Info' } }
+            }
         }
         'updateManual' { foreach ($s in 'wuauserv','UsoSvc','WaaSMedicSvc') { if (Test-ServiceExists $s) { Set-ServiceStart -Name $s -StartType 'Manual' } } }
         'capability' {
@@ -5396,7 +5439,31 @@ function Get-SwitchStyle {
     $script:SwitchStyle = [Windows.Markup.XamlReader]::Parse($x)
     return $script:SwitchStyle
 }
-function New-FeatureCards {
+function Invoke-FeatureSwitch {
+    param($Card,$Tweak,$Sync)
+    $turnOff = -not [bool]$Sync.Sw.IsChecked
+    $undo = { $Sync.Busy = $true; $Sync.Sw.IsChecked = -not [bool]$Sync.Sw.IsChecked; $Sync.Hid.IsChecked = -not [bool]$Sync.Sw.IsChecked; $Sync.Busy = $false; $Sync.State.Text = $(if ($Sync.Sw.IsChecked) { 'On' } else { 'Off' }) }
+    if ($script:ApplyRun) { Write-Log 'Changes are still being applied; try the switch again in a moment.' 'Warn'; & $undo; return }
+    if ($turnOff) {
+        if ($Card.On -eq 'defender') {
+            $tamper = $null; try { $tamper = [bool](Get-MpComputerStatus -ErrorAction Stop).IsTamperProtected } catch { }
+            if ($tamper) {
+                if ([System.Windows.MessageBox]::Show("Tamper Protection is on, so Windows ignores the switch that turns Defender off.`r`n`r`nTurn off Tamper Protection in Windows Security > Virus & threat protection > Manage settings, then flip this switch again.`r`n`r`nOpen Windows Security now?",'Microsoft Defender','YesNo','Information') -eq 'Yes') { Start-Process 'windowsdefender://threatsettings' }
+                & $undo; return
+            }
+        }
+        $msg = switch ($Card.On) {
+            'defender' { 'Turn off Microsoft Defender? The PC has no built-in antivirus until you turn it back on.' }
+            'update' { 'Turn off Windows Update? Windows gets no updates, including security fixes, until you turn it back on.' }
+            default { 'Turn off Xbox services? Game Pass, the Xbox app and Xbox controller settings stop working until you turn them back on.' }
+        }
+        if ([System.Windows.MessageBox]::Show($msg,$Card.Title,'OKCancel','Warning') -ne 'OK') { & $undo; return }
+    }
+    $cb = New-Object Windows.Controls.CheckBox; $cb.IsChecked = $true
+    $node = @{ Parent=$cb; Tweak=$Tweak; Choice=$null; TargetApplied=$turnOff; Children=@() }
+    Write-Log ('{0} turned {1}.' -f $Card.Title,$(if ($turnOff) { 'off' } else { 'on' })) 'Action'
+    [void](Invoke-ApplySelected -Nodes @($node) -RestoreFirst $false)
+}function New-FeatureCards {
     $grid = New-Object Windows.Controls.Primitives.UniformGrid; $grid.Columns = 3; $grid.Margin = '4,0,4,8'
     foreach ($fc in $script:FeatureCards) {
         $tw = @($script:Tweaks | Where-Object { $_.Id -eq $fc.Id })[0]
@@ -5425,10 +5492,11 @@ function New-FeatureCards {
         $sync = @{ Busy=$false; Sw=$sw; Hid=$hid; State=$state }
         $show = { $sync.State.Text = $(if ($sync.Sw.IsChecked) { 'On' } else { 'Off' }) }.GetNewClosure()
         $fromHid = { if ($sync.Busy) { return }; $sync.Busy = $true; $sync.Sw.IsChecked = -not [bool]$sync.Hid.IsChecked; $sync.Busy = $false; & $show }.GetNewClosure()
-        $fromSw = { if ($sync.Busy) { return }; $sync.Busy = $true; $sync.Hid.IsChecked = -not [bool]$sync.Sw.IsChecked; $sync.Busy = $false; & $show }.GetNewClosure()
+        $cardDef = $fc; $cardTweak = $tw
+        $fromSw = { if ($sync.Busy) { return }; $sync.Busy = $true; $sync.Hid.IsChecked = -not [bool]$sync.Sw.IsChecked; $sync.Busy = $false; & $show; Invoke-FeatureSwitch $cardDef $cardTweak $sync }.GetNewClosure()
         $hid.Add_Checked($fromHid); $hid.Add_Unchecked($fromHid); $sw.Add_Checked($fromSw); $sw.Add_Unchecked($fromSw)
         $hid.Add_IsEnabledChanged({ $sync.Sw.IsEnabled = $sync.Hid.IsEnabled }.GetNewClosure())
-        $hid.IsChecked = $false; $sw.IsChecked = $true; & $show
+        $sync.Busy = $true; $hid.IsChecked = $false; $sw.IsChecked = $true; $sync.Busy = $false; & $show
     }
     return $grid
 }
@@ -5439,7 +5507,7 @@ foreach ($st in @('System','Services','Startup and tasks','Features','Memory and
     $items = @($tweaksTweaks | Where-Object { $_.SubTab -eq $st -and -not $script:FeatureCardOn.ContainsKey($_.Id) })
     if (-not $items.Count) { continue }
     $stPanel = New-TweakPanel $items
-    if ($st -eq 'Features') { $stDock = New-Object Windows.Controls.DockPanel; $stCards = New-FeatureCards; [Windows.Controls.DockPanel]::SetDock($stCards,'Top'); [void]$stDock.Children.Add($stCards); [void]$stDock.Children.Add($stPanel); $stPanel = $stDock }
+    if ($st -eq 'Features') { $stDock = New-Object Windows.Controls.DockPanel; $stCards = New-FeatureCards; [Windows.Controls.DockPanel]::SetDock($stCards,'Top'); [void]$stDock.Children.Add($stCards); [void]$stDock.Children.Add($stPanel); $stPanel.Tag = $stCards; $stPanel.Add_ScrollChanged({ param($s,$e) $want = if ($s.VerticalOffset -gt 2) { 'Collapsed' } else { 'Visible' }; if ($s.Tag.Visibility -ne $want) { $s.Tag.Visibility = $want } }); $stPanel = $stDock }
     $sti = New-Object Windows.Controls.TabItem; $sti.Header=$st; $sti.Content=(New-HintedPage $st $stPanel)
     [void]$innerTabs.Items.Add($sti)
 }
