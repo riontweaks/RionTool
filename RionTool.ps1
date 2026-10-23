@@ -10,9 +10,10 @@ trap {
     $logDir = Join-Path $env:ProgramData 'RionTool'
     try { New-Item -ItemType Directory -Path $logDir -Force | Out-Null } catch { }
     $text = "[{0}] {1}`r`n{2}`r`n" -f (Get-Date -Format o), $_.Exception.Message, $_.ScriptStackTrace
-    try { Add-Content -Path (Join-Path $logDir 'error.log') -Value $text -Encoding UTF8 } catch { }
+    $errFile = Join-Path $logDir 'error.log'
+    try { Add-Content -Path $errFile -Value $text -Encoding UTF8 -ErrorAction Stop } catch { $errFile = Join-Path $env:TEMP 'RionTool-error.log'; try { Add-Content -Path $errFile -Value $text -Encoding UTF8 } catch { } }
     Write-Host ("Rion Tool stopped: {0}" -f $_.Exception.Message) -ForegroundColor Red
-    Write-Host ("Details written to {0}" -f (Join-Path $logDir 'error.log')) -ForegroundColor Red
+    Write-Host ("Details written to {0}" -f $errFile) -ForegroundColor Red
     Read-Host 'Press Enter to close' | Out-Null
     break
 }
@@ -386,12 +387,10 @@ function Get-OriginalRecords {
         'netRsc' { foreach ($r in @(Get-NetAdapterRsc -ErrorAction Stop)) { $records += @{ kind='netRscState'; path=$r.Name; name='rsc'; v4=[bool]$r.IPv4Enabled; v6=[bool]$r.IPv6Enabled } } }
         'netbios' { foreach ($c in @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = True' -ErrorAction Stop)) { $records += @{ kind='netbiosState'; path=[string]$c.SettingID; name=[string]$c.Description; value=[int]$c.TcpipNetbiosOptions } } }
         'teredo' { $tc = Get-NetTeredoConfiguration -ErrorAction Stop; $records += @{ kind='teredoState'; path='teredo'; name='type'; value=[string]$tc.Type } }
-        'usbPower' {
-            foreach ($d in @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop)) { $records += @{ kind='usbPowerState'; path=[string]$d.InstanceName; name='enable'; enabled=[bool]$d.Enable } }
-        }
+        'usbPower' { foreach ($d in @(Get-UsbPowerDevices)) { $records += @{ kind='usbPowerState'; path=$d.Name; name='enable'; enabled=$d.Enable } } }
         'mmagent' { $m = Get-MMAgent -ErrorAction Stop; $records += @{ kind='mmAgent'; path='mmagent'; name=[string]$Action.feature; enabled=[bool]$m.($Action.feature) } }
         'runkeyAll' { foreach ($e in @(Get-StartupEntries)) { $records += Get-RegValueRecord -Path $e.Approved -Name $e.Name } }
-        'dxGlobal' { $records += Get-RegValueRecord -Path $script:DxPrefsPath -Name 'DirectXUserGlobalSettings' }
+        'dxGlobal' { $cur = Get-DxGlobalSetting ([string]$Action.name); $records += @{ kind='dxPair'; path='DirectXUserGlobalSettings'; name=[string]$Action.name; existed=($null -ne $cur); value=[string]$cur } }
         'dxApp' { $records += Get-RegValueRecord -Path $script:DxPrefsPath -Name ([string]$Action.exe) }
         'qosGame' { $qn = 'Rion DSCP ' + [IO.Path]::GetFileNameWithoutExtension([string]$Action.exe); $records += @{ kind='qosPolicy'; path='qos'; name=$qn; exe=[string]$Action.exe; existed=[bool](@(Get-NetQosPolicy -ErrorAction Stop | Where-Object { $_.Name -eq $qn }).Count) } }
         'powerMode' { $overlay=Get-ActivePowerOverlay; if (-not $overlay) { throw 'Could not read the current power mode.' }; $records += @{ kind='powerOverlay'; path='overlay'; name='ac'; value=$overlay } }
@@ -926,6 +925,20 @@ function Set-PowerSettingsVisibility {
 }
 
 $script:DxPrefsPath = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+function Get-UsbPowerDevices {
+    $list = @()
+    try { $list = @(Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name=[string]$_.InstanceName; Enable=[bool]$_.Enable; Cim=$_; Wmi=$null } }) } catch { $list = @() }
+    if (-not $list.Count) { try { $list = @(Get-WmiObject -Namespace 'root\wmi' -Class MSPower_DeviceEnable -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name=[string]$_.InstanceName; Enable=[bool]$_.Enable; Cim=$null; Wmi=$_ } }) } catch { $list = @() } }
+    return @($list | Where-Object { $_.Name })
+}
+function Set-UsbPowerDevice {
+    param($Device,[bool]$Enable)
+    if ($Device.Cim) { try { Set-CimInstance -InputObject $Device.Cim -Property @{ Enable = $Enable } -ErrorAction Stop; return $true } catch { } }
+    $w = $Device.Wmi
+    if (-not $w) { try { $w = @(Get-WmiObject -Namespace 'root\wmi' -Class MSPower_DeviceEnable -ErrorAction Stop | Where-Object { [string]$_.InstanceName -eq $Device.Name })[0] } catch { $w = $null } }
+    if ($w) { try { $w.Enable = $Enable; [void]$w.Put(); return $true } catch { } }
+    return $false
+}
 function Get-DxGlobalSetting {
     param([string]$Name)
     $raw = [string](Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences' -Name 'DirectXUserGlobalSettings' -ErrorAction SilentlyContinue).DirectXUserGlobalSettings
@@ -1138,6 +1151,7 @@ function Test-RecordAtTarget {
         'powerMode' { return ($Record.kind -eq 'powerOverlay' -and [string]$Record.value -eq ([string]$Action.guid).ToLowerInvariant()) }
         'throttleApp' { return ($Record.kind -eq 'throttleApp' -and [bool]$Record.exempt -eq [bool]$Action.exempt) }
         'msiMode' { return ($Record.kind -eq 'regValue' -and $Record.existed -and [string]$Record.value -eq '1') }
+        { $_ -in 'taskFolder','task','taskNamePattern' } { return ($Record.kind -eq 'taskState' -and [bool]$Record.enabled -eq [bool]$Action.enable) }
     }
     return $false
 }
@@ -1155,7 +1169,7 @@ function Save-OriginalRecords {
                 $key = Get-RecordKey $record
                 $existing = @($list | Where-Object { (Get-RecordKey $_) -eq $key }) | Select-Object -First 1
                 if (-not $existing) { [void]$list.Add($record) }
-                elseif ($existing.untouched -and -not $record['untouched']) { $list[$list.IndexOf($existing)] = $record }
+                elseif ($existing.untouched -or ($action.kind -in @('mpPreference','service','registry','registryDel','optionalFeature','appxStartup','powerSetting','mmagent','qosGame','powerMode','throttleApp','msiMode','taskFolder','task','taskNamePattern') -and -not $record['untouched'])) { $list[$list.IndexOf($existing)] = $record }
                 $script:Journal[$Id] = @($list)
             }
         }
@@ -1178,6 +1192,7 @@ function Restore-OriginalRecord {
     param($Record)
     switch ($Record.kind) {
         'adlx' { Restore-AdlxRecord $Record }
+        'dxPair' { Set-DxGlobalSetting -Name ([string]$Record.name) -Value $(if ($Record.existed) { [string]$Record.value } else { $null }) }
         'nvdrs' { Restore-NvRecord $Record }
         'classicMenuState' {
             Restore-OriginalRecord $Record.original
@@ -1253,7 +1268,7 @@ function Restore-OriginalRecord {
             if ($LASTEXITCODE -ne 0) { throw ("bcdedit could not restore {0}={1}: {2}" -f $Record.name,$Record.value,((@($out) -join ' ').Trim())) }
         }
         'powerIndex' {
-            if (-not $Record.scheme) { throw 'This older undo record has no power plan GUID; its destination cannot be determined safely.' }
+            if (-not $Record.scheme) { $Record = $Record.Clone(); $Record['scheme'] = Get-ActiveSchemeGuid; if (-not $Record.scheme) { throw 'The active power plan could not be read.' } }
             foreach ($side in 'ac','dc') {
                 $r = Invoke-PowerCfg @(("-set{0}valueindex" -f $side),[string]$Record.scheme,[string]$Record.path,[string]$Record.name,[string]$Record.$side)
                 if ($r.ExitCode -ne 0) { throw ("Could not restore {0} on plan {1}: {2}" -f $Record.name,$Record.scheme,$r.Error) }
@@ -1268,7 +1283,7 @@ function Restore-OriginalRecord {
         'netRscState' { if (Get-NetAdapter -Name $Record.path -ErrorAction Stop) { Set-NetAdapterRsc -Name $Record.path -IPv4Enabled ([bool]$Record.v4) -IPv6Enabled ([bool]$Record.v6) -ErrorAction Stop } }
         'netbiosState' { $c = Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction Stop | Where-Object { [string]$_.SettingID -eq [string]$Record.path } | Select-Object -First 1; if (-not $c) { throw 'The saved NetBIOS adapter is unavailable.' }; $result=Invoke-CimMethod -InputObject $c -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions=[uint32]$Record.value } -ErrorAction Stop; if ($result.ReturnValue -notin 0,1) { throw ('NetBIOS restore failed: {0}' -f $result.ReturnValue) } }
         'teredoState' { if ([string]$Record.value) { Set-NetTeredoConfiguration -Type ([string]$Record.value) -ErrorAction Stop } }
-        'usbPowerState' { $devices=@(Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop | Where-Object { [string]$_.InstanceName -eq [string]$Record.path }); if (-not $devices.Count) { throw 'The saved power-management device is unavailable.' }; foreach ($d in $devices) { Set-CimInstance -InputObject $d -Property @{ Enable=[bool]$Record.enabled } -ErrorAction Stop | Out-Null } }
+        'usbPowerState' { $dev = @(Get-UsbPowerDevices | Where-Object { $_.Name -eq [string]$Record.path }); if ($dev.Count -and $dev[0].Enable -ne [bool]$Record.enabled) { [void](Set-UsbPowerDevice $dev[0] ([bool]$Record.enabled)) } }
         'featureState' { Invoke-Action @{ kind='optionalFeature'; names=@($Record.name); enable=[bool]$Record.enabled } }
         'throttleApp' { Invoke-Action @{ kind='throttleApp'; exe=[string]$Record.name; exempt=[bool]$Record.exempt } }
         'qosPolicy' { Invoke-Action @{ kind='qosGame'; exe=[string]$Record.exe; enable=[bool]$Record.existed } }
@@ -1291,6 +1306,7 @@ function Restore-OriginalRecord {
 function Get-RevertActions {
     param($Tweak)
     if ($script:Journal.ContainsKey($Tweak.Id)) { return @(@{ kind='restoreRecords'; id=$Tweak.Id }) }
+    if ($script:FeatureCardOn -and $script:FeatureCardOn.ContainsKey($Tweak.Id)) { return @(@{ kind='featureOn'; feature=$script:FeatureCardOn[$Tweak.Id] }) }
     return @()
 }
 function Get-RevertLabel {
@@ -1472,14 +1488,11 @@ function Set-ServiceStartNow {
     $svcType = 0; try { $svcType = [int](Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name Type -ErrorAction Stop).Type } catch { }
     $registryOnly = ($Name -match '_[0-9a-fA-F]{4,}$') -or ($svcType -band 0x0B) -or ($svcType -band 0x40)
     if ($type -and -not $registryOnly) {
-        try { Set-Service -Name $Name -StartupType $type -ErrorAction Stop; return }
-        catch {
-            $msg = $_.Exception.Message
-            if ($msg -match '(?i)parameter is incorrect|not valid') { Write-Log ("{0} cannot be changed through the service manager; set in the registry instead (applies after a restart)." -f $Name) 'Info' }
-            else { Write-Log ("Service manager refused to change {0}: {1}" -f $Name,$msg) 'Warn' }
-        }
+        try { Set-Service -Name $Name -StartupType $type -ErrorAction Stop; return } catch { }
     }
-    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name Start -Value $Start -Type DWord -ErrorAction Stop
+    try { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name Start -Value $Start -Type DWord -ErrorAction Stop }
+    catch { throw ("Windows protects the {0} service, so it cannot be changed." -f $Name) }
+    if ($type -and -not $registryOnly) { Write-Log ("{0} was changed in the registry; it takes effect after a restart." -f $Name) 'Info' }
 }
 function Set-ServiceStart {
     param([string]$Name,[string]$StartType,[switch]$Stop)
@@ -2011,10 +2024,10 @@ $script:Tweaks += (New-Tweak -Id 'adv.bcd.timers' -Tab 'Advanced' -SubTab '' -Gr
 $script:Tweaks += (New-Tweak -Id 'adv.boot.menu' -Tab 'Advanced' -SubTab '' -Group 'Boot' -Label 'Set legacy boot menu and 3s timeout' -Risk 'Safe' -Detect $null -Apply @(@{kind='bcdedit';args='/set {current} bootmenupolicy legacy'},@{kind='bcdedit';args='/timeout 3'}) -Revert @(@{kind='bcdedit';args='/set {current} bootmenupolicy standard'}) -Info 'Uses the text boot menu and a 3-second timeout. Cosmetic/boot-speed preference; does not affect performance in Windows.')
 $script:Tweaks += (New-Tweak -Id 'adv.devices.rdpredirect' -Tab 'Advanced' -SubTab '' -Group 'Virtual and debug adapters' -Label 'Disable Remote Desktop device redirection' -Risk 'Moderate' -Detect @{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services';name='fDisableCdm'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services';name='fDisableCdm';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services';name='fDisableCdm'}) -Info 'Disables drive redirection in incoming Remote Desktop sessions by policy. Remote users will not be able to access this PC local drives through RDP.' )
  
-$script:Tweaks += (New-Tweak -Id 'sec.defender' -Tab 'Security' -SubTab '' -Group 'Defender' -Label 'Disable Microsoft Defender (requires Tamper Protection off)' -Risk 'Risky' -Detect @{kind='service';name='WinDefend'} -Apply @(@{kind='defender';enable=$false}) -Revert @(@{kind='defender';enable=$true}) -Warn 'Turns off all built-in antivirus: real-time protection, scheduled and on-access scans, cloud submission, the Defender services (WinDefend, WdNisSvc, Sense, MDCoreSvc) and every Windows Defender scheduled task. The PC has no built-in malware protection until re-enabled, and some anti-cheat and apps may refuse to run.' -Info 'Fully turns off Microsoft Defender: real-time, behaviour and on-access protection, scheduled scans, cloud and sample submission, the DisableAntiSpyware/DisableAntiVirus policies, its services (WinDefend, WdNisSvc, Sense, MDCoreSvc) and all its scheduled tasks. Tamper Protection must be off first; the tool opens that page and waits. The ELAM boot drivers stay so Windows still boots. Unticking restores everything.')
+$script:Tweaks += (New-Tweak -Id 'sec.defender' -Tab 'Security' -SubTab '' -Group 'Defender' -Label 'Disable Microsoft Defender (requires Tamper Protection off)' -Risk 'Risky' -Detect @{kind='defenderOff'} -Apply @(@{kind='defender';enable=$false}) -Revert @(@{kind='defender';enable=$true}) -Warn 'Turns off all built-in antivirus: real-time protection, scheduled and on-access scans, cloud submission and every Windows Defender scheduled task. The PC has no built-in malware protection until re-enabled, and some anti-cheat and apps may refuse to run.' -Info 'Fully turns off Microsoft Defender: real-time, behaviour and on-access protection, scheduled scans, cloud and sample submission and all its scheduled tasks, using the official Defender policies. Tamper Protection must be off first; the tool opens that page and waits. Windows protects its core Defender services, so they keep running but sit idle while Defender is off. Turning it back on restores everything.')
 $script:Tweaks += (New-Tweak -Id 'sec.updates' -Tab 'Security' -SubTab '' -Group 'Updates' -Label 'Disable Windows Update' -Risk 'Risky' -Detect @{kind='serviceAny';names=@('wuauserv','UsoSvc','WaaSMedicSvc');start='Disabled'} -Apply @(@{kind='update';enable=$false}) -Revert @(@{kind='update';enable=$true}) -Info 'Sets wuauserv/UsoSvc/WaaSMedicSvc to disabled and stops them. Re-enabling restores Automatic/Manual start and starts the services again. You will receive no security updates while disabled.')
 $script:Tweaks += (New-Tweak -Id 'sec.vbs' -Tab 'Security' -SubTab '' -Group 'Core isolation' -Label 'Memory Integrity (HVCI)' -Risk 'Moderate' -Type 'dropdown' -Options @('Default','On','Off') -Detect @{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity';name='Enabled'} -Info 'Memory Integrity (HVCI) protects kernel code. Turning it off can reduce security and may prevent Riot Vanguard or other anti-cheat software from running when that protection is required. Rion warns before applying Off. Reboot required.')
-$script:Tweaks += (New-Tweak -Id 'sec.encryption.prevent' -Tab 'Security' -SubTab '' -Group 'Encryption' -Label 'Prevent automatic device encryption' -Risk 'Moderate' -Detect @{kind='bitlockerSupported'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\FVE';name='PreventDeviceEncryption';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\FVE';name='PreventDeviceEncryption'}) -Info 'Prevents automatic device encryption provisioning by policy. It does not decrypt a drive that is already encrypted.' )
+$script:Tweaks += (New-Tweak -Id 'sec.encryption.prevent' -Tab 'Security' -SubTab '' -Group 'Encryption' -Label 'Prevent automatic device encryption' -Risk 'Moderate' -Detect @{kind='bitlockerSupported'} -Apply @(@{kind='registry';path='HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker';name='PreventDeviceEncryption';value=1;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker';name='PreventDeviceEncryption'}) -Info 'Prevents automatic device encryption provisioning by policy. It does not decrypt a drive that is already encrypted.' )
 $script:Tweaks += (New-Tweak -Id 'sec.encryption.decrypt' -Tab 'Security' -SubTab '' -Group 'Encryption' -Label 'Decrypt software BitLocker on the system drive' -Risk 'Risky' -Detect @{kind='bitlockerOn'} -Apply @(@{kind='bitlockerOff'}) -ApplyVerb 'Starting decryption of' -DoneVerb 'Started system-drive decryption' -Info 'Starts manage-bde decryption of the Windows system drive. Decryption runs in the background and can take a long time; recovery protection is reduced. Rion cannot automatically restore encryption because that requires a valid protector and may need the recovery key.' )
 $script:Tweaks += (New-Tweak -Id 'sec.widgets' -Tab 'Tweaks' -SubTab 'Features' -Group 'Start, taskbar and search' -Label 'Turn off Widgets' -Risk 'Safe' -Detect @{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Dsh';name='AllowNewsAndInterests'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Dsh';name='AllowNewsAndInterests';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Dsh';name='AllowNewsAndInterests'}) -Info 'Disables the Widgets/news feed policy. Widgets will be unavailable until the policy is removed.'  -Recommend $true)
 $script:Tweaks += (New-Tweak -Id 'sec.crossresume' -Tab 'Tweaks' -SubTab 'Features' -Group 'Cloud and cross-device' -Label 'Disable cross-device resume' -Risk 'Safe' -Detect @{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';name='EnableCdp'} -Apply @(@{kind='registry';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';name='EnableCdp';value=0;type='DWord'}) -Revert @(@{kind='registryDel';path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\System';name='EnableCdp'}) -Info 'Disables Connected Devices Platform cross-device experiences by policy. Phone Link and cross-device resume features may stop syncing.'  -Recommend $true)
@@ -2122,7 +2135,6 @@ $edge = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
 $edgeDetect = @{kind='anyPath';paths=$script:BrowserPaths.Edge}
 $script:Tweaks += (New-RegRow -Id 'feat.ai.copilotall' -SubTab 'Features' -Group 'AI and Copilot' -Label 'Turn off and remove Copilot' -Risk 'Safe' -Detect @{kind='registry';minBuild=26100} -Values @(
     @('HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot','TurnOffWindowsCopilot',1),
-    @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot','TurnOffWindowsCopilot',1),
     @($wai,'RemoveMicrosoftCopilotApp',1),
     @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced','ShowCopilotButton',0)
 ) -Info 'WindowsAI policies TurnOffWindowsCopilot and RemoveMicrosoftCopilotApp (24H2 and later): Copilot is turned off, its taskbar entry hidden, and Windows uninstalls the Microsoft Copilot app. Microsoft 365 apps are not affected.')
@@ -2265,7 +2277,7 @@ $script:Tweaks += (New-Tweak -Id 'app.discord.priority' -Tab 'Tweaks' -SubTab 'A
 $script:Tweaks += New-ServiceGroup -Id 'svc.gpu.amd.extevents' -Tab 'Tweaks' -SubTab 'Services' -Group 'GPU software' -Label 'Stop AMD External Events Utility' -Risk 'Safe' -RevertType 'Automatic' -Services @('AMD External Events Utility','AMDExternalEventsUtility','atiesrxx') -Info 'AMD External Events Utility (atiesrxx) handles display and power events, Adrenalin hotkeys and the in-game overlay. Stopping it can disable brightness/overlay hotkeys and some event-driven features; the display driver itself keeps working. Only shows on AMD systems.'
 
 $mouseKey = 'HKCU:\Control Panel\Mouse'
-$script:Tweaks += (New-Tweak -Id 'input.usb.power' -Tab 'Advanced' -SubTab '' -Group 'Input devices' -Label 'Stop Windows turning off USB and input devices to save power' -Risk 'Moderate' -Recommend $false -Detect @{kind='registry'} -Apply @(@{kind='usbPower';enable=$false}) -Revert @(@{kind='usbPower';enable=$true}) -Warn 'Keeps USB, network and input devices powered so they do not drop out (mouse stutter, audio pops, controller disconnects), but uses more power and shortens laptop battery life; re-plugging a device can re-enable its power saving.' -Info 'Clears the "Allow the computer to turn off this device to save power" option on every device that exposes it, using the MSPower_DeviceEnable WMI class. Best on a desktop. Unticking turns device power management back on.')
+$script:Tweaks += (New-Tweak -Id 'input.usb.power' -Tab 'Advanced' -SubTab '' -Group 'Input devices' -Label 'Stop Windows turning off USB and input devices to save power' -Risk 'Moderate' -Recommend $false -Detect @{kind='usbPower'} -Apply @(@{kind='usbPower';enable=$false}) -Revert @(@{kind='usbPower';enable=$true}) -Warn 'Keeps USB, network and input devices powered so they do not drop out (mouse stutter, audio pops, controller disconnects), but uses more power and shortens laptop battery life; re-plugging a device can re-enable its power saving.' -Info 'Clears the "Allow the computer to turn off this device to save power" option on every device that exposes it, using the MSPower_DeviceEnable WMI class. Best on a desktop. Unticking turns device power management back on.')
 
 $diskSub = '0012ee47-9041-4b5d-9b77-535fba8b1442'; $diskIdle = '6738e2c4-e8a5-4a42-b16a-e040e769756e'
 $script:Tweaks += (New-Tweak -Id 'pwr.disk.never' -Tab 'Advanced' -SubTab '' -Group 'Power and adapters' -Label 'Never spin down drives when plugged in' -Risk 'Moderate' -Recommend $false -Detect @{kind='powerSettingPresent';sub=$diskSub;setting=$diskIdle;desktopOnly=$true} -Apply @(@{kind='powerSetting';sub=$diskSub;setting=$diskIdle;value=0;label='Turn off hard disk after';acOnly=$true}) -Revert @(@{kind='powerSetting';sub=$diskSub;setting=$diskIdle;value='Default';label='Turn off hard disk after'}) -Warn 'Drives stay powered, so there is no wake-up stall when a sleeping disk is accessed, but idle power use is slightly higher. SSDs are unaffected; this matters for mechanical drives.' -Info 'Sets "Turn off hard disk after" to Never while plugged in, removing the pause when Windows wakes a parked mechanical drive. Desktop only; unticking restores the plan default.')
@@ -3671,6 +3683,20 @@ $script:VendorTabMap = @{
     'svc.vendor.intel'=@('Intel','Intel services'); 'svc.vendor.intellms'=@('Intel','Intel services'); 'svc.vendor.inteldsa'=@('Intel','Intel services'); 'gpu.intel.todo'=@('Intel','Intel Graphics Software')
 }
 foreach ($t in $script:Tweaks) { $m = $script:VendorTabMap[$t.Id]; if ($m) { $t.Tab = $m[0]; $t.SubTab = ''; $t.Group = $m[1] } }
+$script:TestFirstIds = @('gpu.hags','gpu.mpo','gpu.mpo.minfps','gpu.msi','gpu.gamemode','gpu.windowed','gpu.vrr.windowed','cpu.parking','cpu.ppm.idle','cpu.ppm.idledepth','cpu.ppm.minstate','cpu.ppm.perfepp','cpu.boost','cpu.ppm.hetero','cpu.ppm.maxfreq','cpu.ppm.responsive','cpu.ppm.latency','cpu.ppm.throttle','pwr.pcie.aspm','pwr.usb.suspend','mem.compression','mem.pagecombining','net.intmod')
+foreach ($t in $script:Tweaks) {
+    if ($script:TestFirstIds -notcontains $t.Id) { continue }
+    $t.Group = switch -Wildcard ($t.Id) { 'gpu.*' { 'Graphics' } 'cpu.*' { 'Processor' } 'pwr.*' { 'Device power saving' } 'mem.*' { 'Memory' } default { 'Network' } }
+    $t.Tab = 'Test first'; $t.SubTab = ''; $t.Recommend = $false
+}
+$script:FeatureCards = @(
+    @{ Id='sec.defender'; On='defender'; Title='Microsoft Defender'; Glyph=0xE83D; Text='Built-in antivirus and real-time protection. To turn it off, first switch off Tamper Protection in Windows Security > Virus & threat protection. Windows keeps two core Defender services running, but they sit idle while Defender is off.'; Repair={ Repair-Defender } }
+    @{ Id='sec.updates'; On='update'; Title='Windows Update'; Glyph=0xE895; Text='Security fixes, drivers and feature updates. While it is off, Windows gets no updates at all, including security fixes.'; Repair={ Repair-WindowsUpdate } }
+    @{ Id='svc.xbox.live'; On='xbox'; Title='Xbox'; Glyph=0xE7FC; Text='Xbox sign-in, cloud saves, Game Pass and Xbox controller services. While it is off, Game Pass, the Xbox app and Xbox controller settings stop working.'; Repair={ Invoke-GamingRepair } }
+)
+$script:FeatureCardOn = @{}
+foreach ($fc in $script:FeatureCards) { $script:FeatureCardOn[$fc.Id] = $fc.On }
+foreach ($t in $script:Tweaks) { if ($script:FeatureCardOn.ContainsKey($t.Id)) { $t.Tab = 'Tweaks'; $t.SubTab = 'Features'; $t.Group = 'Main features' } }
 $script:GuardedServices = @('KeyIso','CryptSvc','VaultSvc','SamSs','ProfSvc','gpsvc','UserManager','TokenBroker','TBS','VSS','swprv','TrustedInstaller','ClipSVC','sppsvc','LicenseManager','AppXSvc','StateRepository','Winmgmt','EventLog','RpcSs','Schedule','BrokerInfrastructure','CoreMessagingRegistrar','SystemEventsBroker','TimeBrokerSvc','DispBrokerDesktopSvc','TextInputManagementService','LSM','UdkUserSvc','Power','PlugPlay','GoogleChromeElevationService','MicrosoftEdgeElevationService','BraveElevationService')
 foreach ($t in $script:Tweaks) {
     $blocked = @($t.Apply | Where-Object { $_.kind -eq 'service' -and $script:GuardedServices -contains [string]$_.name })
@@ -4244,6 +4270,8 @@ function Get-TweakDetection {
                 'taskAnyName' { $found=@($allTasks | Where-Object { $d.names -contains $_.TaskName }); $present=($found.Count -gt 0); if(-not $present){$reason='Not present'} else { $applied = -not ($found | Where-Object { $_.State -ne 'Disabled' }) } }
                 'taskAnyNamePattern' { $found=@($allTasks | Where-Object { $taskName=$_.TaskName; $d.patterns | Where-Object { $taskName -like $_ } }); $present=($found.Count -gt 0); if(-not $present){$reason='Not present'} else { $applied = -not ($found | Where-Object { $_.State -ne 'Disabled' }) } }
                 'appx'       { $present = [bool](Get-AppxPackage -Name $d.name -ErrorAction SilentlyContinue); if(-not $present){$reason='Not present'} else {$state=Test-TweakRegistryActionsApplied $t; if($null -ne $state){$applied=[bool]$state} } }
+                'defenderOff' { $present=$true; $dp='HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; $dv=Get-ItemProperty -LiteralPath $dp -ErrorAction SilentlyContinue; $dr=Get-ItemProperty -LiteralPath ($dp + '\Real-Time Protection') -ErrorAction SilentlyContinue; $applied = (($dv -and ([int]$dv.DisableAntiSpyware -eq 1 -or [int]$dv.DisableAntiVirus -eq 1)) -and $dr -and [int]$dr.DisableRealtimeMonitoring -eq 1) }
+                'usbPower'   { $devs=@(Get-UsbPowerDevices); $present=($devs.Count -gt 0); if(-not $present){$reason='No devices report power saving'} else { $on=@($devs | Where-Object { $_.Enable }).Count; $applied=($on -eq 0); if($on -and $on -lt $devs.Count){$statusText=('{0} of {1} devices still power saving' -f $on,$devs.Count)} } }
                 'registry'   { $present=$true; $state=Test-TweakRegistryActionsApplied $t; if($null -ne $state){$applied=[bool]$state} }
                 'runkey'     { $present = [bool](Get-RunKeyEntry $d.name); if(-not $present){$reason='Not present'} else { $applied = Test-RunKeyDisabled $d.name } }
                 'runkeyAny'  { $found=@($d.names | Where-Object { Get-RunKeyEntry $_ }); $present=($found.Count -gt 0); if(-not $present){$reason='Not present'} else { $applied = -not @($found | Where-Object { -not (Test-RunKeyDisabled $_) }).Count } }
@@ -4473,10 +4501,12 @@ function Invoke-Action {
         'restoreRecords' {
             $records = @($script:Journal[$Action.id])
             $failed = @()
+            if ($records.Count -and -not @($records | Where-Object { -not $_.untouched }).Count) { Write-Log 'This was already set this way before Rion Tool changed anything, so there is nothing to undo.' 'Info' }
             for ($i = $records.Count - 1; $i -ge 0; $i--) {
                 if ($records[$i].untouched) { continue }
                 try { Restore-OriginalRecord $records[$i] }
                 catch {
+                    if ($_.Exception.Message -match '(?i)protects|access is denied|not allowed|unauthorized') { Write-Log ("{0} is protected by Windows and was left as it is." -f $records[$i].name) 'Info'; continue }
                     Write-Log ("Could not restore {0}: {1}" -f $records[$i].name,$_.Exception.Message) 'Warn'
                     $failed = @($records[$i]) + $failed
                 }
@@ -4652,6 +4682,13 @@ function Invoke-Action {
         'powerValue' { $alias=[string]$Action.alias; $value=[string]$Action.value; if($value -eq 'Default'){ return }; powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $alias $value 2>$null; powercfg -setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $alias $value 2>$null; powercfg -S SCHEME_CURRENT 2>$null }
         'gameMode' { if($Action.value -eq 'Default'){ Remove-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled'; Remove-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' } else { $v=[int]($Action.value -eq 'On'); Set-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AutoGameModeEnabled' -Value $v -Type DWord; Set-RegValue -Path 'HKCU:\Software\Microsoft\GameBar' -Name 'AllowAutoGameMode' -Value $v -Type DWord } }
         'adlx' { Set-AdlxChoice -Id ([string]$Action.id) -Choice ([string]$Action.value) }
+        'featureOn' {
+            switch ([string]$Action.feature) {
+                'defender' { Repair-Defender }
+                'update' { Repair-WindowsUpdate }
+                'xbox' { foreach ($xs in 'XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc') { [void](Set-ServiceStart -Name $xs -StartType 'Manual') } }
+            }
+        }
         'nvdrs' { Set-NvChoice -Id ([string]$Action.id) -Choice ([string]$Action.value) }
         'hardwareGpu' { if($Action.value -eq 'Default'){Remove-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode'}else{$v=[int]$Action.value;Set-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name 'HwSchMode' -Value $v -Type DWord} }
         'setDns' { Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object { try { if($Action.servers){Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $Action.servers -ErrorAction Stop}else{Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses -ErrorAction Stop} } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' } } }
@@ -4680,10 +4717,9 @@ function Invoke-Action {
             }
         }
         'usbPower' {
-            $want = [bool]$Action.enable
-            $done = $false
-            try { Get-CimInstance -Namespace 'root\wmi' -ClassName MSPower_DeviceEnable -ErrorAction Stop | ForEach-Object { try { Set-CimInstance -InputObject $_ -Property @{ Enable = $want } -ErrorAction Stop; $done = $true } catch { } } } catch { Write-Log ('A step did not finish: {0}' -f $_.Exception.Message) 'Warn' }
-            if (-not $done) { Get-WmiObject -Namespace 'root\wmi' -Class MSPower_DeviceEnable -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Enable = $want; [void]$_.Put() } catch {} } }
+            $want = [bool]$Action.enable; $ok = 0; $skipped = 0
+            foreach ($d in @(Get-UsbPowerDevices)) { if ($d.Enable -eq $want) { continue }; if (Set-UsbPowerDevice $d $want) { $ok++ } else { $skipped++ } }
+            if ($skipped) { Write-Log ('{0} device(s) do not let Windows change their power saving and were skipped.' -f $skipped) 'Info' }
         }
         'hostsBlock' {
             $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
@@ -5329,6 +5365,7 @@ $script:PageHints = @{
     'CPU'='Processor power and scheduling. The Balanced plan with Power mode set to Best performance suits most PCs.'
     'Security'='Windows Security, Defender, encryption and Windows Update.'
     'Advanced'='Lower-level settings: processes, priorities, timers, power for devices and crash behaviour.'
+    'Test first'='These settings help on some PCs and hurt on others, depending on the CPU, GPU, monitor and game. Turn on one at a time, play or run a benchmark, then keep it or untick it to undo. No preset or one-click optimize changes them.'
     'AMD'='Settings for AMD processors, Radeon graphics and AMD Software. Only shown on PCs with AMD hardware.'
     'NVIDIA'='Settings for GeForce graphics, the NVIDIA app and NVIDIA Profile Inspector. Only shown on PCs with an NVIDIA GPU.'
     'Intel'='Settings for Intel processors, Intel graphics and Intel helper software. Only shown on PCs with Intel hardware.'
@@ -5352,13 +5389,58 @@ function Add-Tab {
     return $ti
 }
  
+$script:SwitchStyle = $null
+function Get-SwitchStyle {
+    if ($script:SwitchStyle) { return $script:SwitchStyle }
+    $x = '<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="CheckBox"><Setter Property="Cursor" Value="Hand"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="CheckBox"><Grid Width="50" Height="26" Background="Transparent"><Border x:Name="Track" CornerRadius="13" Background="#3A3F47"/><Ellipse x:Name="Knob" Width="20" Height="20" Fill="White" HorizontalAlignment="Left" Margin="3,0,0,0"/></Grid><ControlTemplate.Triggers><Trigger Property="IsChecked" Value="True"><Setter TargetName="Track" Property="Background" Value="#4C8C5A"/><Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/><Setter TargetName="Knob" Property="Margin" Value="0,0,3,0"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>'
+    $script:SwitchStyle = [Windows.Markup.XamlReader]::Parse($x)
+    return $script:SwitchStyle
+}
+function New-FeatureCards {
+    $grid = New-Object Windows.Controls.Primitives.UniformGrid; $grid.Columns = 3; $grid.Margin = '4,0,4,8'
+    foreach ($fc in $script:FeatureCards) {
+        $tw = @($script:Tweaks | Where-Object { $_.Id -eq $fc.Id })[0]
+        if (-not $tw) { continue }
+        $card = New-Object Windows.Controls.Border; $card.CornerRadius = '8'; $card.Padding = '16'; $card.Margin = '4'; $card.BorderThickness = '1'
+        Set-ThemeBrush $card 'Background' 'Panel'; Set-ThemeBrush $card 'BorderBrush' 'Border'
+        $dock = New-Object Windows.Controls.DockPanel
+        $head = New-Object Windows.Controls.DockPanel; $head.Margin = '0,0,0,8'
+        $icon = New-Object Windows.Controls.TextBlock; $icon.FontFamily = 'Segoe MDL2 Assets'; $icon.FontSize = 26; $icon.Text = [string][char]$fc.Glyph; $icon.Margin = '0,0,12,0'; $icon.VerticalAlignment = 'Center'; Set-ThemeBrush $icon 'Foreground' 'Accent'
+        $title = New-Object Windows.Controls.TextBlock; $title.Text = $fc.Title; $title.FontSize = 17; $title.FontWeight = 'SemiBold'; $title.VerticalAlignment = 'Center'; Set-ThemeBrush $title 'Foreground' 'Text'
+        $sw = New-Object Windows.Controls.CheckBox; $sw.Style = (Get-SwitchStyle); $sw.VerticalAlignment = 'Center'
+        $state = New-Object Windows.Controls.TextBlock; $state.Margin = '0,0,10,0'; $state.VerticalAlignment = 'Center'; Set-ThemeBrush $state 'Foreground' 'SubText'
+        $right = New-Object Windows.Controls.StackPanel; $right.Orientation = 'Horizontal'; [void]$right.Children.Add($state); [void]$right.Children.Add($sw)
+        [Windows.Controls.DockPanel]::SetDock($icon,'Left'); [Windows.Controls.DockPanel]::SetDock($right,'Right')
+        foreach ($c in $icon,$right,$title) { [void]$head.Children.Add($c) }
+        [Windows.Controls.DockPanel]::SetDock($head,'Top'); [void]$dock.Children.Add($head)
+        $repair = New-Object Windows.Controls.Button; $repair.Content = 'Repair'; $repair.HorizontalAlignment = 'Left'; $repair.Margin = '0,10,0,0'; $repair.Padding = '14,4,14,4'; $repair.Tag = $fc
+        $repair.Add_Click({ param($s,$e) try { Write-Log ('Repairing {0}...' -f $s.Tag.Title) 'Action'; & $s.Tag.Repair; Write-Log ('{0} repaired.' -f $s.Tag.Title) 'Success' } catch { Write-Log ('{0} repair failed: {1}' -f $s.Tag.Title,$_.Exception.Message) 'Error' } })
+        [Windows.Controls.DockPanel]::SetDock($repair,'Bottom'); [void]$dock.Children.Add($repair)
+        $desc = New-Object Windows.Controls.TextBlock; $desc.Text = $fc.Text; $desc.TextWrapping = 'Wrap'; Set-ThemeBrush $desc 'Foreground' 'SubText'; [void]$dock.Children.Add($desc)
+        $card.Child = $dock
+        [void]$grid.Children.Add($card)
+        $hid = New-Object Windows.Controls.CheckBox
+        $entry = @{ Tweak=$tw; Check=$hid; Combo=$null; Status=(New-Object Windows.Controls.TextBlock); Touched=$false; Row=$card }
+        $script:Rows[$tw.Id] = $entry
+        $sync = @{ Busy=$false; Sw=$sw; Hid=$hid; State=$state }
+        $show = { $sync.State.Text = $(if ($sync.Sw.IsChecked) { 'On' } else { 'Off' }) }.GetNewClosure()
+        $fromHid = { if ($sync.Busy) { return }; $sync.Busy = $true; $sync.Sw.IsChecked = -not [bool]$sync.Hid.IsChecked; $sync.Busy = $false; & $show }.GetNewClosure()
+        $fromSw = { if ($sync.Busy) { return }; $sync.Busy = $true; $sync.Hid.IsChecked = -not [bool]$sync.Sw.IsChecked; $sync.Busy = $false; & $show }.GetNewClosure()
+        $hid.Add_Checked($fromHid); $hid.Add_Unchecked($fromHid); $sw.Add_Checked($fromSw); $sw.Add_Unchecked($fromSw)
+        $hid.Add_IsEnabledChanged({ $sync.Sw.IsEnabled = $sync.Hid.IsEnabled }.GetNewClosure())
+        $hid.IsChecked = $false; $sw.IsChecked = $true; & $show
+    }
+    return $grid
+}
 $tweaksTweaks = $script:Tweaks | Where-Object { $_.Tab -eq 'Tweaks' }
 $innerTabs = New-Object Windows.Controls.TabControl
 $innerTabs.Background = 'Transparent'; $innerTabs.BorderThickness = '0'
 foreach ($st in @('System','Services','Startup and tasks','Features','Memory and storage','Apps')) {
-    $items = @($tweaksTweaks | Where-Object { $_.SubTab -eq $st })
+    $items = @($tweaksTweaks | Where-Object { $_.SubTab -eq $st -and -not $script:FeatureCardOn.ContainsKey($_.Id) })
     if (-not $items.Count) { continue }
-    $sti = New-Object Windows.Controls.TabItem; $sti.Header=$st; $sti.Content=(New-HintedPage $st (New-TweakPanel $items))
+    $stPanel = New-TweakPanel $items
+    if ($st -eq 'Features') { $stDock = New-Object Windows.Controls.DockPanel; $stCards = New-FeatureCards; [Windows.Controls.DockPanel]::SetDock($stCards,'Top'); [void]$stDock.Children.Add($stCards); [void]$stDock.Children.Add($stPanel); $stPanel = $stDock }
+    $sti = New-Object Windows.Controls.TabItem; $sti.Header=$st; $sti.Content=(New-HintedPage $st $stPanel)
     [void]$innerTabs.Items.Add($sti)
 }
 Add-Tab 'Tweaks' $innerTabs | Out-Null
@@ -5392,7 +5474,7 @@ $dProgramTab=New-Object Windows.Controls.TabItem; $dProgramTab.Header='Program a
 Add-Tab 'Debloat' $debloatPanel | Out-Null
 foreach ($b in @($btnAuto,$btnScan,$btnDebApply)) { $b.IsEnabled = $false }
  
-foreach ($tab in @('Security','Advanced')) {
+foreach ($tab in @('Security','Advanced','Test first')) {
     $items = $script:Tweaks | Where-Object { $_.Tab -eq $tab }
     Add-Tab $tab (New-TweakPanel $items) | Out-Null
 }
@@ -7091,8 +7173,6 @@ $fixesPanel = New-Object Windows.Controls.DockPanel; $fixesPanel.Margin='10'
 $fixDefs = @(
     @{ Group='Repair Windows'; Label='Run DISM and SFC (repair system files)'; Info='DISM /Online /Cleanup-Image /RestoreHealth repairs the component store first, then sfc /scannow repairs system files from it. Fixes "features not applying" and corruption.'; Act={ Start-Process cmd '/k DISM /Online /Cleanup-Image /RestoreHealth & sfc /scannow' } }
     @{ Group='Deep cleanup'; Label='Deep clean: DISM, SFC, temp files and Disk Cleanup'; Info='Opens a window that runs DISM RestoreHealth, SFC, component store cleanup, clears user and Windows temp folders, runs Disk Cleanup (keeping the DirectX shader cache, Downloads, Recycle Bin, previous Windows installations, the Reset this PC image, File History versions, older drivers and crash dumps), then flushes DNS. Prefetch is kept because it speeds up launches. Takes 15-30 minutes.'; Act={ Invoke-FullCleanup } }
-    @{ Group='Repair Windows'; Label='Turn Windows Update back on'; Info='Puts the Windows Update, Update Orchestrator, Medic, BITS and Delivery Optimization services back to their defaults, removes policies other tools use to block updates (no auto update, blocked update servers, hidden update page) and turns the update tasks back on. Your feature-update deferral and driver choices stay as they are.'; Act={ Repair-WindowsUpdate } }
-    @{ Group='Repair Windows'; Label='Turn Microsoft Defender back on'; Info='Undoes the Rion Tool Defender option and removes the policies other tools use to switch Defender off (DisableAntiSpyware, real-time protection and cloud policies), turns its scheduled tasks back on and opens Windows Security. Restart afterwards.'; Act={ Repair-Defender } }
     @{ Group='Gaming and anti-cheat'; Label='Install missing game runtimes (Visual C++, DirectX)'; Info='Installs the Visual C++ 2015-2022 runtimes (64 and 32-bit) and the DirectX End-User Runtime through WinGet when they are missing. Most games and launchers need them; a missing one shows up as "VCRUNTIME140.dll was not found" or "d3dx9_43.dll is missing".'; Act={ Install-GameRuntimes } }
     @{ Group='Repair Windows'; Label='Fix Start menu typing (search ignores keys until clicked)'; Info='Lets the Start menu, Search, shell, text-input, lock screen and sign-in apps run in the background even when background apps are blocked, clears the per-user background-app off switches, re-enables the text input service, ctfmon and the Shell components service (UdkUserSvc, which hands what you type in Start to Search), then restarts Search and Start.'; Act={ Repair-StartSearch } }
     @{ Group='Repair Windows'; Label='Fix typing in Start not opening Search (Shell components service)'; Info='When you press Windows and start typing but nothing is searched until you click the search box: Start hands what you type to Search through the Shell components service (UdkUserSvc). Sets it and its per-user instance back to Manual (the Windows default), starts it and restarts Start and Search. Older Rion Tool builds disabled it in Turn off newer per-user background helpers. Sign out and back in if the first try still needs a click.'; Act={ Repair-StartSearchHandoff } }
@@ -7114,7 +7194,6 @@ $fixDefs = @(
     @{ Group='Repair Windows'; Label='Repair lock screen and sign-in screen (stuck on the wallpaper)'; Info='For a lock screen that shows only the wallpaper and never opens the sign-in box, or a PIN or face sign-in that stopped working. Runs Repair sign-in and credential services (Windows Hello PIN, face and fingerprint, Microsoft account and credential services back to Windows defaults), lets the lock screen and sign-in apps run again when background apps are blocked, turns the Windows push notification services back on (the lock screen uses them for app status), and re-registers the lock screen app. Warns when the PC only allows Windows Hello sign-in. Undoes those parts of the Turn off PIN and biometric sign-in, Stop Microsoft account sign-in and Turn off Windows push notifications rows. Restart required.'; Act={ Repair-LockScreenSignIn } }
     @{ Group='Repair Windows'; Label='Clear Fault Tolerant Heap app list'; Info='Runs Rundll32.exe fthsvc.dll,FthSysprepSpecialize, the built-in command that resets the list of applications Fault Tolerant Heap is tracking. Apps that crashed a few times in the past lose the FTH shims that slow their memory allocations. Windows can add an app again if it keeps crashing.'; Act={ $proc = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\rundll32.exe') -ArgumentList 'fthsvc.dll,FthSysprepSpecialize' -Wait -PassThru; Write-Log ("Fault Tolerant Heap app list cleared (exit {0})." -f $proc.ExitCode) 'Success' } }
     @{ Group='Repair Windows'; Label='Rebuild the search index'; Info='Resets Windows Search. Fixes broken Start/Settings search.'; Act={ Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows Search' 'SetupCompletedSuccessfully' 0 'DWord'; Restart-Service WSearch -ErrorAction SilentlyContinue } }
-    @{ Group='Gaming and anti-cheat'; Label='Repair Xbox app and services (Microsoft Gaming Repair Tool + reinstall)'; Info='Runs the bundled Gaming Repair Tool only if its Authenticode signature is valid and Microsoft signed, then repairs or installs Xbox app, Game Bar, Gaming Services and Identity Provider through WinGet. It never falls back to an MS Store page.'; Act={ Invoke-GamingRepair } }
     @{ Group='Microsoft apps'; Label='Restore all built-in Microsoft apps'; Info='Re-registers Microsoft app packages whose files remain on disk, then restores the catalogued core apps through WinGet without opening Store UI. Covers Store, Xbox, Snipping Tool, Photos, and Calculator. App downloads do not request Windows OS updates.'; Act={ Restore-MsApps } }
     @{ Group='Gaming and anti-cheat'; Label='Fix HVCI for Valorant / Riot Vanguard'; Info='Enables Windows Memory Integrity (HVCI) and VBS, clears an explicit boot-time hypervisor/VSM opt-out, and leaves the settings unlocked for Windows Security. Restart is required. CPU virtualization must also be enabled in UEFI/BIOS, and incompatible drivers may need updating. Vanguard may require HVCI on some systems.'; Act={ Set-HvciEnabledForAntiCheat } }
     @{ Group='Gaming and anti-cheat'; Label='Fix Control Flow Guard for Vanguard / Valorant'; Info='Enables the Windows system-level Control Flow Guard mitigation through Exploit Protection. CFG helps protect indirect calls in compatible applications. A per-app override or managed policy can still take precedence; restart affected apps or Windows.'; Act={ Enable-ControlFlowGuard } }
@@ -8587,7 +8666,7 @@ foreach ($geGame in $script:GameEditors.Values) {
 }
 Add-Tab 'Games' $gamesTabs | Out-Null
 
-$tabOrder = @('Home','Tweaks','CPU','Power plan','GPU','AMD','NVIDIA','Intel','Networking','Games','Security','Advanced','Debloat','Cleanup','Fixes','Settings')
+$tabOrder = @('Home','Tweaks','CPU','Power plan','GPU','AMD','NVIDIA','Intel','Networking','Games','Security','Advanced','Test first','Debloat','Cleanup','Fixes','Settings')
 $allTabs = @($Tabs.Items)
 $Tabs.Items.Clear()
 foreach ($name in $tabOrder) { foreach ($ti in $allTabs) { if ([string]$ti.Header -eq $name) { [void]$Tabs.Items.Add($ti) } } }
@@ -8785,6 +8864,7 @@ function Test-GamerMax {
     param($Tweak)
     if ($Tweak.Risk -notin 'Safe','Moderate') { return $false }
     if ($script:GamerMaxExclude -contains $Tweak.Id) { return $false }
+    if ($script:TestFirstIds -contains $Tweak.Id) { return $false }
     if ($script:BuiltOnLaptop -and $script:LaptopRisky -contains $Tweak.Id) { return $false }
     if ([string]$Tweak.Id -match '(?i)xbox|xbl|gamedvr|defender|\.wu\.|update|bluetooth|feat\.net\.|svc\.net\.wifi|svc\.net\.eth') { return $false }
     if ([string]$Tweak.Label -match '(?i)xbox|defender|windows update|bluetooth') { return $false }
@@ -9265,6 +9345,37 @@ function Complete-ApplyRun {
     }
 }
 
+function Get-TweakTargets {
+    param($Tweak)
+    $out = New-Object System.Collections.ArrayList
+    foreach ($a in @(@($Tweak.Apply) + @($Tweak.Revert))) {
+        if (-not $a) { continue }
+        switch ([string]$a.kind) {
+            { $_ -in 'registry','registryDel' } { [void]$out.Add(('reg|{0}|{1}' -f ([string]$a.path).ToLower(),([string]$a.name).ToLower())) }
+            'service' { [void]$out.Add(('svc|{0}' -f ([string]$a.name).TrimEnd('*').ToLower())) }
+            { $_ -in 'taskFolder','task' } { [void]$out.Add(('task|{0}' -f ([string]$a.path).ToLower())) }
+            'taskNamePattern' { foreach ($pt in @($a.patterns)) { [void]$out.Add(('taskname|{0}' -f ([string]$pt).TrimEnd('*').ToLower())) } }
+            'dxGlobal' { [void]$out.Add(('dx|{0}' -f ([string]$a.name).ToLower())) }
+            'dxApp' { [void]$out.Add(('dxapp|{0}' -f ([string]$a.exe).ToLower())) }
+            'powerSetting' { [void]$out.Add(('pwr|{0}|{1}' -f ([string]$a.sub).ToLower(),([string]$a.setting).ToLower())) }
+            default { [void]$out.Add(('kind|{0}' -f [string]$a.kind)) }
+        }
+    }
+    return @($out | Select-Object -Unique)
+}
+function Get-RelatedTweaks {
+    param([string[]]$Ids)
+    if (-not $script:TweakTargetMap) { $script:TweakTargetMap = @{}; foreach ($tw in $script:Tweaks) { $script:TweakTargetMap[$tw.Id] = @(Get-TweakTargets $tw) } }
+    $mine = @($Ids | ForEach-Object { $script:TweakTargetMap[$_] } | Where-Object { $_ } | Select-Object -Unique)
+    $hit = foreach ($tw in $script:Tweaks) {
+        if ($Ids -contains $tw.Id) { $tw; continue }
+        $theirs = @($script:TweakTargetMap[$tw.Id])
+        $shared = $false
+        foreach ($a in $mine) { foreach ($b in $theirs) { if ($a -eq $b -or ($a.StartsWith('task|') -and $b.StartsWith('task|') -and ($a.StartsWith($b) -or $b.StartsWith($a))) -or ($a.StartsWith('svc|') -and $b.StartsWith('svc|') -and ($a.StartsWith($b) -or $b.StartsWith($a)))) { $shared = $true; break } }; if ($shared) { break } }
+        if ($shared) { $tw }
+    }
+    return @($hit)
+}
 function Invoke-ApplySelected {
     param($Nodes,[bool]$RestoreFirst)
     if ($script:ApplyRun) { Write-Log 'An apply is already running.' 'Warn'; return }
@@ -9289,7 +9400,7 @@ function Invoke-ApplySelected {
             }
         })
         $changedIds = @($jobs | ForEach-Object { $_.Tweak.Id } | Select-Object -Unique)
-        $rescan = @($script:Tweaks | Where-Object { $changedIds -contains $_.Id })
+        $rescan = @(Get-RelatedTweaks -Ids @($changedIds))
         $parts = Get-ApplyWorkerParts
         $vars = @{}
         foreach ($k in $parts.Vars) { $var = Get-Variable -Name $k -Scope Script -ErrorAction SilentlyContinue; $vars[$k] = if ($var) { $var.Value } else { $null } }
@@ -9881,7 +9992,7 @@ $sync = [hashtable]::Synchronized(@{ Done=$false; Env=$null; Detection=$null; Er
 $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState='MTA'; $rs.Open()
 $rs.SessionStateProxy.SetVariable('sync',$sync)
 $rs.SessionStateProxy.SetVariable('tweaks',$script:Tweaks)
-$fnNames = 'Invoke-Detect','Get-NominalRamGB','Get-SvcThreshold','Get-TweakDetection','Test-TweakRegistryActionsApplied','Test-ServiceExists','Resolve-ServiceNames','Get-ServiceStartValue','Get-RunKeyEntry','Test-GameInstalled','Test-InstalledAppName','Get-BcdValue','Get-PowerIndexRecord','Get-ActiveSchemeGuid','Get-ActionLiveState','Get-TweakLiveState','Get-OptionalFeatureStates','Get-AppxStartupStates','Test-ServiceStartMet','Get-DxGlobalSetting','Get-MsiTargets','Get-NetPropertyMaxValue','Get-MatchingNetProperties','Resolve-NetDisplayValue','Test-IsLaptop','Test-HybridIntelCpu','Test-RunKeyDisabled','Get-StartupEntries','Test-StartupEntryDisabled','Get-BitLockerState','Initialize-DetectionCaches','Clear-DetectionCaches','Get-RegValueFast',
+$fnNames = 'Invoke-Detect','Get-UsbPowerDevices','Get-NominalRamGB','Get-SvcThreshold','Get-TweakDetection','Test-TweakRegistryActionsApplied','Test-ServiceExists','Resolve-ServiceNames','Get-ServiceStartValue','Get-RunKeyEntry','Test-GameInstalled','Test-InstalledAppName','Get-BcdValue','Get-PowerIndexRecord','Get-ActiveSchemeGuid','Get-ActionLiveState','Get-TweakLiveState','Get-OptionalFeatureStates','Get-AppxStartupStates','Test-ServiceStartMet','Get-DxGlobalSetting','Get-MsiTargets','Get-NetPropertyMaxValue','Get-MatchingNetProperties','Resolve-NetDisplayValue','Test-IsLaptop','Test-HybridIntelCpu','Test-RunKeyDisabled','Get-StartupEntries','Test-StartupEntryDisabled','Get-BitLockerState','Initialize-DetectionCaches','Clear-DetectionCaches','Get-RegValueFast',
     'Get-DetectionSnapshot','Get-ActivePowerOverlay','Get-BoardInstallerHint','Get-DxAppSetting','Get-GamesOnHdd','Get-MemoryConfigReport','Get-MsiIrqMap','Get-RatedMemorySpeed','Get-RecognizedGames','Get-ThrottleExemptions','Invoke-PowerCfg','Test-ThrottleExempt'
 $initScript = ('$script:DxPrefsPath = ''{0}''' -f $script:DxPrefsPath) + "`n" + '$script:ThrottleExemptCache = $null' + "`n" + '$script:PowerModes = [ordered]@{' + ((@($script:PowerModes.Keys) | ForEach-Object { "'{0}'='{1}'" -f $_,$script:PowerModes[$_] }) -join ';') + '}' + "`n"
 foreach ($fn in $fnNames) { $initScript += "function $fn { $((Get-Command $fn).ScriptBlock) }`n" }
